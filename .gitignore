@@ -1,0 +1,42 @@
+# Keil / MDK build outputs
+adc_collection/MDK-ARM/adc_collection/
+adc_collection/MDK-ARM/Objects/
+adc_collection/MDK-ARM/Listings/
+
+# Keil user/session files
+*.uvgui.*
+*.uvguix.*
+*.uvgui
+*.uvguix
+*.scvd
+*.uvoptx.bak
+*.uvprojx.bak
+
+# Build artifacts
+*.o
+*.d
+*.crf
+*.axf
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.lnp
+*.htm
+*.dep
+*.iex
+*.sct.bak
+
+# Temporary files
+*.bak
+*.tmp
+*.log
+*.orig
+*.rej
+Thumbs.db
+.DS_Store
+
+# Editor folders
+.vscode/
+.idea/

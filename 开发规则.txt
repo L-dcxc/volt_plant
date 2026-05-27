@@ -1,0 +1,2 @@
+不要直接修改我的硬件配置，有需要请让我到stm32cubemx中修改
+所有新增的代码必须写在USER CODE BEGIN----USER CODE END之间
