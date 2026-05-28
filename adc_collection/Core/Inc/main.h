@@ -59,6 +59,8 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define BAT_ADC_EN_Pin GPIO_PIN_1
 #define BAT_ADC_EN_GPIO_Port GPIOC
+#define ADC_PWR_EN_Pin GPIO_PIN_0
+#define ADC_PWR_EN_GPIO_Port GPIOA
 #define LED_GREEN_Pin GPIO_PIN_0
 #define LED_GREEN_GPIO_Port GPIOB
 #define LED_YELLOW_Pin GPIO_PIN_1

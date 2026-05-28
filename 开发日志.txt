@@ -1,2 +1,7 @@
 5/27
 初始化硬件
+
+5/28
+AD7124-8 SPI 通信测试通过：USART1 输出 ID register read back: 0x17，设备高半字节 0x1 正确，识别为 AD7124-8，silicon revision 为 0x7。
+5/28
+补充遗漏硬件初始化（PA0）

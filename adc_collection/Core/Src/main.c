@@ -31,7 +31,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdio.h>
+#include "ad7124.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -52,6 +53,9 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+static AD7124_HandleTypeDef had7124;
+static uint8_t ad7124_ready = 0U;
+static uint32_t ad7124_print_tick = 0U;
 
 /* USER CODE END PV */
 
@@ -112,17 +116,116 @@ int main(void)
   MX_USART3_UART_Init();
   MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
+  /* Latch main power rail: PWR_ON is active-high, must be set ASAP so the
+     +2.8V_ADC rail (and other downstream rails) stay on after the boot key
+     is released. AD7124 needs this to be powered. */
+  HAL_GPIO_WritePin(PWR_ON_GPIO_Port, PWR_ON_Pin, GPIO_PIN_SET);
+  AD7124_BoardPowerOn(500U);
 
+  printf("OPEN is OK!!!\r\n");
+  printf("PWR_ON latched HIGH\r\n");
+  printf("ADC_PWR_EN set HIGH\r\n");
+  {
+    uint8_t ad7124_id = 0U;
+    uint8_t ad7124_status = 0U;
+    uint16_t ad7124_control = 0U;
+    uint32_t ad7124_error = 0U;
+    HAL_StatusTypeDef ad_status;
+    HAL_StatusTypeDef cfg_status;
+
+    printf("\r\n\r\n=== AD7124-8 Communication Test ===\r\n");
+    printf("SPI1 ready, resetting AD7124...\r\n");
+
+    ad_status = AD7124_Init(&had7124, &hspi1);
+    if (ad_status != HAL_OK)
+    {
+      printf("[FAIL] SPI transfer error, HAL status = %d\r\n", (int)ad_status);
+    }
+    else
+    {
+      ad_status = AD7124_ReadID(&had7124, &ad7124_id);
+      if (ad_status != HAL_OK)
+      {
+        printf("[FAIL] ID read error, HAL status = %d\r\n", (int)ad_status);
+      }
+      else
+      {
+        printf("ID register read back: 0x%02X\r\n", (unsigned)ad7124_id);
+        if (AD7124_IsDeviceID(ad7124_id) != 0U)
+        {
+          printf("[ OK ] AD7124-8 detected, silicon revision 0x%X\r\n",
+                 (unsigned)(ad7124_id & 0x0FU));
+          if (AD7124_ReadStatus(&had7124, &ad7124_status) == HAL_OK)
+          {
+            printf("STATUS register: 0x%02X\r\n", (unsigned)ad7124_status);
+          }
+          if (AD7124_ReadAdcControl(&had7124, &ad7124_control) == HAL_OK)
+          {
+            printf("ADC_CONTROL register: 0x%04X\r\n", (unsigned)ad7124_control);
+          }
+          if (AD7124_ReadError(&had7124, &ad7124_error) == HAL_OK)
+          {
+            printf("ERROR register: 0x%06lX\r\n", (unsigned long)ad7124_error);
+          }
+          cfg_status = AD7124_ConfigAin15SingleEnded(&had7124);
+          if (cfg_status == HAL_OK)
+          {
+            ad7124_ready = 1U;
+            printf("AD7124 channel15 acquisition started: AIN15-AVSS\r\n");
+          }
+          else
+          {
+            printf("[FAIL] AD7124 acquisition config error, HAL status = %d\r\n", (int)cfg_status);
+          }
+        }
+        else
+        {
+          printf("[FAIL] Unexpected ID, upper nibble should be 0x1\r\n");
+          printf("       Check: SPI wiring, CS to GND, +2.8V_ADC, SPI mode 3\r\n");
+        }
+      }
+    }
+    printf("=== Test done, entering main loop ===\r\n");
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    HAL_GPIO_TogglePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin);
     HAL_IWDG_Refresh(&hiwdg);
+    HAL_Delay(250);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    if ((ad7124_ready != 0U) && ((HAL_GetTick() - ad7124_print_tick) >= 1000U))
+    {
+      uint32_t raw_data = 0U;
+      int32_t signed_data = 0;
+      int32_t input_uv = 0;
+      uint8_t sample_status = 0U;
+      uint8_t sample_channel = 0U;
+      HAL_StatusTypeDef sample_st;
+
+      ad7124_print_tick = HAL_GetTick();
+      sample_st = AD7124_ReadSample(&had7124, &raw_data, &signed_data, &sample_status, 200U);
+      if (sample_st == HAL_OK)
+      {
+        sample_channel = AD7124_StatusToChannel(sample_status);
+        input_uv = AD7124_BipolarCodeToMicrovolts(raw_data, AD7124_DEFAULT_VREF_MV, AD7124_DEFAULT_GAIN);
+        printf("[AD7124] CH=%u STATUS=0x%02X RAW=0x%06lX CODE=%ld VIN=%lduV\r\n",
+               (unsigned)sample_channel,
+               (unsigned)sample_status,
+               (unsigned long)raw_data,
+               (long)signed_data,
+               (long)input_uv);
+      }
+      else
+      {
+        printf("[AD7124] sample read error, HAL status = %d\r\n", (int)sample_st);
+      }
+    }
   }
   /* USER CODE END 3 */
 }
@@ -203,6 +306,26 @@ void PeriphCommonClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+/* ---------------------------------------------------------------------------
+ * printf retarget to USART1 (PA9 TX / PA10 RX, 115200 8N1).
+ * If "Use MicroLIB" is OFF in Keil, the __use_no_semihosting stubs below keep
+ * the linker happy.
+ * --------------------------------------------------------------------------- */
+#if defined(__ARMCC_VERSION) && !defined(__MICROLIB)
+#pragma import(__use_no_semihosting)
+struct __FILE { int handle; };
+FILE __stdout;
+void _sys_exit(int x)   { (void)x; while (1) { } }
+void _ttywrch(int ch)   { (void)ch; }
+#endif
+
+int fputc(int ch, FILE *f)
+{
+  (void)f;
+  HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1U, 100U);
+  return ch;
+}
 
 /* USER CODE END 4 */
 
