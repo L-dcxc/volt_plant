@@ -23,6 +23,7 @@
 #include "fatfs.h"
 #include "i2c.h"
 #include "iwdg.h"
+#include "rtc.h"
 #include "sdmmc.h"
 #include "spi.h"
 #include "tim.h"
@@ -32,7 +33,9 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
+#include "app_rtc.h"
 #include "ad7124.h"
+#include "storage.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -55,6 +58,8 @@
 /* USER CODE BEGIN PV */
 static AD7124_HandleTypeDef had7124;
 static uint8_t ad7124_ready = 0U;
+static uint8_t ad7124_loop_print_enable = 0U;
+static uint8_t storage_boot_test_enable = 0U;
 static uint32_t ad7124_print_tick = 0U;
 
 /* USER CODE END PV */
@@ -68,6 +73,32 @@ void PeriphCommonClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void PrintSdDebug(const char *tag)
+{
+  GPIO_PinState cd_state;
+  uint32_t hal_error;
+  HAL_SD_StateTypeDef hal_state;
+
+  cd_state = HAL_GPIO_ReadPin(SD_CD_GPIO_Port, SD_CD_Pin);
+  hal_state = HAL_SD_GetState(&hsd1);
+  hal_error = HAL_SD_GetError(&hsd1);
+
+  printf("[SD] %s diag: SD_CD=%u HAL_STATE=%lu HAL_ERR=0x%08lX BLOCK_NBR=%lu BLOCK_SIZE=%lu CARD_TYPE=%lu\r\n",
+         tag,
+         (unsigned)((cd_state == GPIO_PIN_SET) ? 1U : 0U),
+         (unsigned long)hal_state,
+         (unsigned long)hal_error,
+         (unsigned long)hsd1.SdCard.LogBlockNbr,
+         (unsigned long)hsd1.SdCard.LogBlockSize,
+         (unsigned long)hsd1.SdCard.CardType);
+}
+
+static void ResetSdmmcForRetry(void)
+{
+  (void)f_mount(NULL, (TCHAR const *)SDPath, 0U);
+  (void)HAL_SD_DeInit(&hsd1);
+  MX_SDMMC1_SD_Init();
+}
 
 /* USER CODE END 0 */
 
@@ -115,6 +146,7 @@ int main(void)
   MX_USART2_UART_Init();
   MX_USART3_UART_Init();
   MX_FATFS_Init();
+  MX_RTC_Init();
   /* USER CODE BEGIN 2 */
   /* Latch main power rail: PWR_ON is active-high, must be set ASAP so the
      +2.8V_ADC rail (and other downstream rails) stay on after the boot key
@@ -125,6 +157,68 @@ int main(void)
   printf("OPEN is OK!!!\r\n");
   printf("PWR_ON latched HIGH\r\n");
   printf("ADC_PWR_EN set HIGH\r\n");
+  AppRtc_Init();
+  {
+    char rtc_timestamp[APP_RTC_TIMESTAMP_SIZE];
+
+    if (AppRtc_FormatTimestamp(rtc_timestamp, sizeof(rtc_timestamp)) != 0U)
+    {
+      printf("[RTC] timestamp: %s\r\n", rtc_timestamp);
+    }
+  }
+  if (storage_boot_test_enable != 0U)
+  {
+    FRESULT sd_result;
+    uint8_t sd_try;
+
+    printf("\r\n=== SD Card Test ===\r\n");
+    HAL_IWDG_Refresh(&hiwdg);
+    printf("[SD] SD_PWR_EN before power on: %u\r\n", (unsigned)Storage_IsPowerEnabled());
+    Storage_PowerOn(1000U);
+    printf("[SD] SD_PWR_EN after power on: %u\r\n", (unsigned)Storage_IsPowerEnabled());
+    PrintSdDebug("before mount");
+    sd_result = FR_NOT_READY;
+    for (sd_try = 0U; sd_try < 3U; sd_try++)
+    {
+      HAL_IWDG_Refresh(&hiwdg);
+      ResetSdmmcForRetry();
+      PrintSdDebug("before mount try");
+      sd_result = Storage_Mount();
+      if (sd_result == FR_OK)
+      {
+        break;
+      }
+      printf("[SD] mount try %u fail: %s (%d)\r\n",
+             (unsigned)(sd_try + 1U),
+             Storage_FresultText(sd_result),
+             (int)sd_result);
+      PrintSdDebug("mount fail");
+      HAL_Delay(500U);
+    }
+    if (sd_result == FR_OK)
+    {
+      printf("[SD] mount ok\r\n");
+      sd_result = Storage_WriteTestCsv();
+      if (sd_result == FR_OK)
+      {
+        printf("[SD] write %s ok\r\n", STORAGE_TEST_FILE_NAME);
+      }
+      else
+      {
+        printf("[SD] write %s fail: %s (%d)\r\n",
+               STORAGE_TEST_FILE_NAME,
+               Storage_FresultText(sd_result),
+               (int)sd_result);
+      }
+    }
+    else
+    {
+      printf("[SD] mount fail: %s (%d)\r\n",
+             Storage_FresultText(sd_result),
+             (int)sd_result);
+    }
+    HAL_IWDG_Refresh(&hiwdg);
+  }
   {
     uint8_t ad7124_id = 0U;
     uint8_t ad7124_status = 0U;
@@ -199,7 +293,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    if ((ad7124_ready != 0U) && ((HAL_GetTick() - ad7124_print_tick) >= 1000U))
+    if ((ad7124_loop_print_enable != 0U) && (ad7124_ready != 0U) && ((HAL_GetTick() - ad7124_print_tick) >= 1000U))
     {
       uint32_t raw_data = 0U;
       int32_t signed_data = 0;
