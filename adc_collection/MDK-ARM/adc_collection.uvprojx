@@ -1414,6 +1414,21 @@
               <FileType>1</FileType>
               <FilePath>..\mycode\app_config_store.c</FilePath>
             </File>
+            <File>
+              <FileName>modbus_rtu.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\mycode\modbus_rtu.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_modbus.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\mycode\app_modbus.c</FilePath>
+            </File>
+            <File>
+              <FileName>ad7124_config.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\mycode\ad7124_config.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

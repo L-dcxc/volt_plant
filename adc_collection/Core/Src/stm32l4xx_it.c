@@ -22,6 +22,7 @@
 #include "stm32l4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "modbus_rtu.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -59,7 +60,7 @@ extern DMA_HandleTypeDef hdma_sdmmc1_rx;
 extern DMA_HandleTypeDef hdma_sdmmc1_tx;
 extern SD_HandleTypeDef hsd1;
 /* USER CODE BEGIN EV */
-
+extern UART_HandleTypeDef huart1;
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -243,5 +244,32 @@ void DMA2_Channel5_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+
+/**
+  * @brief This function handles USART1 global interrupt.
+  */
+void USART1_IRQHandler(void)
+{
+  uint32_t isrflags = READ_REG(huart1.Instance->ISR);
+  uint32_t cr1its = READ_REG(huart1.Instance->CR1);
+
+  /* Clear overrun error if present (prevents RX stall) */
+  if ((isrflags & USART_ISR_ORE) != 0U)
+  {
+    __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_OREF);
+  }
+
+  /* RXNE interrupt: receive data register not empty */
+  if (((isrflags & USART_ISR_RXNE) != 0U) && ((cr1its & USART_CR1_RXNEIE) != 0U))
+  {
+    /* Read data register (clears RXNE flag) */
+    uint8_t byte = (uint8_t)(huart1.Instance->RDR & 0xFFU);
+    ModbusRtu_RxCallback(byte);
+  }
+
+  /* Note: We don't call HAL_UART_IRQHandler because we're not using HAL's
+     interrupt-driven transfer machinery (no HAL_UART_Receive_IT started).
+     This handler is self-contained and only manages Modbus RX. */
+}
 
 /* USER CODE END 1 */

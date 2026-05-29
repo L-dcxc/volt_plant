@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include "main.h"
+#include "app_config.h"
 
 #define AD7124_REG_STATUS       0x00U
 #define AD7124_REG_ADC_CONTROL  0x01U
@@ -19,7 +20,9 @@ extern "C" {
 #define AD7124_REG_CHANNEL_0    0x09U
 #define AD7124_REG_CHANNEL_15   0x18U
 #define AD7124_REG_CONFIG_0     0x19U
+#define AD7124_REG_CONFIG_7     0x20U
 #define AD7124_REG_FILTER_0     0x21U
+#define AD7124_REG_FILTER_7     0x28U
 #define AD7124_REG_OFFSET_0     0x29U
 #define AD7124_REG_GAIN_0       0x31U
 
@@ -64,6 +67,9 @@ HAL_StatusTypeDef AD7124_ReadSample(AD7124_HandleTypeDef *dev, uint32_t *raw_dat
 uint8_t AD7124_StatusToChannel(uint8_t status);
 int32_t AD7124_BipolarCodeToSigned(uint32_t raw_data);
 int32_t AD7124_BipolarCodeToMicrovolts(uint32_t raw_data, int32_t vref_mv, uint8_t gain);
+
+/* New: Apply full configuration from AppConfigImage */
+HAL_StatusTypeDef AD7124_ApplyConfig(AD7124_HandleTypeDef *dev, const AppConfigImage *config);
 
 #ifdef __cplusplus
 }

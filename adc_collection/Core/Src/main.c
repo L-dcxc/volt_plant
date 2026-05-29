@@ -37,6 +37,8 @@
 #include "ad7124.h"
 #include "storage.h"
 #include "app_config_store.h"
+#include "modbus_rtu.h"
+#include "app_modbus.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -48,6 +50,7 @@
 /* USER CODE BEGIN PD */
 #define APP_POWER_ON_HOLD_TIME_MS 2000U
 #define APP_POWER_ON_CHECK_PERIOD_MS 10U
+#define APP_POWER_OFF_HOLD_TIME_MS 3000U
 
 /* USER CODE END PD */
 
@@ -66,6 +69,11 @@ static uint8_t ad7124_ready = 0U;
 static uint8_t ad7124_loop_print_enable = 1U;
 static uint8_t storage_boot_test_enable = 0U;
 static uint32_t ad7124_print_tick = 0U;
+static uint32_t led_blink_tick = 0U;
+static uint8_t modbus_enabled = 1U;
+static uint8_t eeprom_ok = 0U;
+static uint8_t rtc_ok = 0U;
+static uint8_t sd_ok = 0U;
 
 /* USER CODE END PV */
 
@@ -145,6 +153,54 @@ static void AppPower_PrintDiag(const char *tag)
          (unsigned)((HAL_GPIO_ReadPin(KEY_PWR_GPIO_Port, KEY_PWR_Pin) == GPIO_PIN_SET) ? 1U : 0U),
          (unsigned)((HAL_GPIO_ReadPin(PWR_ON_GPIO_Port, PWR_ON_Pin) == GPIO_PIN_SET) ? 1U : 0U),
          (unsigned)AppPower_ReadOutputData(PWR_ON_GPIO_Port, PWR_ON_Pin));
+}
+
+/* Modbus reconfigure callback: re-apply current config to AD7124 hardware.
+   Returns 0 on success, 1 on failure (becomes a Modbus exception). */
+static uint8_t AppModbus_ReconfigureAd7124(void)
+{
+  if (ad7124_ready == 0U)
+  {
+    return 1U;
+  }
+  return (AD7124_ApplyConfig(&had7124, &app_config) == HAL_OK) ? 0U : 1U;
+}
+
+/* Non-blocking long-press shutdown detector. Call once per main-loop
+   iteration. ON_OFF must stay LOW continuously for APP_POWER_OFF_HOLD_TIME_MS;
+   releasing it (HIGH) at any point cancels the shutdown. When the hold is
+   satisfied, PWR_ON is driven LOW to cut the latched power rail. */
+static void AppPower_PollShutdown(void)
+{
+  static uint8_t press_active = 0U;
+  static uint32_t press_start_tick = 0U;
+
+  if (HAL_GPIO_ReadPin(ON_OFF_GPIO_Port, ON_OFF_Pin) == GPIO_PIN_RESET)
+  {
+    /* ON_OFF is held low */
+    if (press_active == 0U)
+    {
+      press_active = 1U;
+      press_start_tick = HAL_GetTick();
+    }
+    else if ((HAL_GetTick() - press_start_tick) >= APP_POWER_OFF_HOLD_TIME_MS)
+    {
+      /* Held long enough: cut power. This removes the board's own supply,
+         so execution stops here once the rail collapses. */
+      HAL_GPIO_WritePin(PWR_ON_GPIO_Port, PWR_ON_Pin, GPIO_PIN_RESET);
+      while (1)
+      {
+        /* Wait for power to drop. Keep feeding the watchdog so we don't
+           reset-and-relatch if the user is still holding the key. */
+        HAL_IWDG_Refresh(&hiwdg);
+      }
+    }
+  }
+  else
+  {
+    /* Released before hold time elapsed: cancel */
+    press_active = 0U;
+  }
 }
 
 /* USER CODE END 0 */
@@ -350,11 +406,11 @@ int main(void)
       ad_status = AD7124_ReadID(&had7124, &ad7124_id);
       if ((ad_status == HAL_OK) && (AD7124_IsDeviceID(ad7124_id) != 0U))
       {
-        cfg_status = AD7124_ConfigAllSingleEnded(&had7124);
+        cfg_status = AD7124_ApplyConfig(&had7124, &app_config);
         if (cfg_status == HAL_OK)
         {
           ad7124_ready = 1U;
-          printf("[AD7124] all 16 single-ended channels enabled (AIN0..AIN15 vs AVSS)\r\n");
+          printf("[AD7124] config applied from EEPROM (per-channel mode/gain/filter)\r\n");
         }
         else
         {
@@ -371,18 +427,56 @@ int main(void)
       printf("[AD7124] SPI init error, HAL=%d\r\n", (int)ad_status);
     }
   }
+
+  /* Update subsystem status flags */
+  eeprom_ok = (Eeprom_IsReady(&app_config_store.eeprom) == HAL_OK) ? 1U : 0U;
+  rtc_ok = 1U; /* RTC initialized successfully if we got here */
+  sd_ok = 0U;  /* SD not tested in normal boot */
+
+  /* Initialize Modbus RTU */
+  if (ad7124_ready != 0U && modbus_enabled != 0U)
+  {
+    ModbusCallbacks modbus_cb;
+    modbus_cb.read_holding_regs = AppModbus_ReadHoldingRegisters;
+    modbus_cb.read_input_regs = AppModbus_ReadInputRegisters;
+    modbus_cb.write_single_reg = AppModbus_WriteSingleRegister;
+    modbus_cb.write_multiple_regs = AppModbus_WriteMultipleRegisters;
+
+    AppModbus_Init(&app_config, &app_config_store);
+    AppModbus_SetReconfigureCallback(AppModbus_ReconfigureAd7124);
+    ModbusRtu_Init(&huart1, app_config.modbus_addr, &modbus_cb);
+    printf("[MODBUS] initialized on USART1, addr=%u, baud=%lu\r\n",
+           (unsigned)app_config.modbus_addr,
+           (unsigned long)app_config.uart_baudrate);
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    HAL_GPIO_TogglePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin);
     HAL_IWDG_Refresh(&hiwdg);
-    HAL_Delay(250);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    /* Long-press shutdown: hold ON_OFF low for 3s to cut power */
+    AppPower_PollShutdown();
+
+    /* 临时：三灯常亮，用于调节限流电阻测试亮度。
+       调试完成后恢复下方注释掉的心跳闪烁逻辑。 */
+    HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
+
+    /* Heartbeat: blink green LED ~2 Hz. Tick-gated so it stays visible now
+       that the loop runs at full speed (no HAL_Delay pacing).
+    if ((HAL_GetTick() - led_blink_tick) >= 250U)
+    {
+      led_blink_tick = HAL_GetTick();
+      HAL_GPIO_TogglePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin);
+    }
+    */
+
     if ((ad7124_loop_print_enable != 0U) && (ad7124_ready != 0U) && ((HAL_GetTick() - ad7124_print_tick) >= 1000U))
     {
       uint8_t round_idx;
@@ -398,17 +492,54 @@ int main(void)
         uint8_t sample_channel = 0U;
         HAL_StatusTypeDef sample_st;
 
-        sample_st = AD7124_ReadSample(&had7124, &raw_data, &signed_data, &sample_status, 500U);
+        /* Service Modbus before each channel read so a request that arrived
+           during the previous sample isn't stalled until the whole 16-channel
+           round finishes. Round latency: ~0..(per-channel timeout) instead of
+           the old worst-case 8s. */
+        if (modbus_enabled != 0U)
+        {
+          ModbusRtu_Poll();
+        }
+
+        /* Per-channel timeout reduced from 500ms to 100ms: AD7124 data ready
+           takes tens of ms in practice; 500ms was overly defensive and caused
+           Modbus to be blocked for seconds when a channel was misconfigured. */
+        sample_st = AD7124_ReadSample(&had7124, &raw_data, &signed_data, &sample_status, 100U);
         if (sample_st == HAL_OK)
         {
+          uint8_t ch_gain;
+
           sample_channel = AD7124_StatusToChannel(sample_status);
-          input_uv = AD7124_BipolarCodeToMicrovolts(raw_data, AD7124_DEFAULT_VREF_MV, AD7124_DEFAULT_GAIN);
-          printf("  CH%02u STATUS=0x%02X RAW=0x%06lX CODE=%ld VIN=%ld uV\r\n",
+
+          /* Convert using this channel's actual gain (per-channel config).
+             Fall back to default gain if the reported channel is out of range
+             or the channel has an invalid (zero) gain. */
+          if (sample_channel < APP_CONFIG_CHANNEL_COUNT &&
+              app_config.channels[sample_channel].gain != 0U)
+          {
+            ch_gain = app_config.channels[sample_channel].gain;
+          }
+          else
+          {
+            ch_gain = AD7124_DEFAULT_GAIN;
+          }
+
+          input_uv = AD7124_BipolarCodeToMicrovolts(raw_data,
+                                                    (int32_t)app_config.adc_vref_mv,
+                                                    ch_gain);
+          printf("  CH%02u STATUS=0x%02X RAW=0x%06lX CODE=%ld GAIN=%u VIN=%ld uV\r\n",
                  (unsigned)sample_channel,
                  (unsigned)sample_status,
                  (unsigned long)raw_data,
                  (long)signed_data,
+                 (unsigned)ch_gain,
                  (long)input_uv);
+
+          /* Update Modbus real-time data */
+          if (modbus_enabled != 0U)
+          {
+            AppModbus_UpdateChannelData(sample_channel, raw_data, input_uv);
+          }
         }
         else
         {
@@ -417,6 +548,19 @@ int main(void)
         }
         HAL_IWDG_Refresh(&hiwdg);
       }
+
+      /* Update sample timestamp and system status */
+      if (modbus_enabled != 0U)
+      {
+        AppModbus_UpdateSampleTimestamp();
+        AppModbus_UpdateSystemStatus(ad7124_ready, eeprom_ok, rtc_ok, sd_ok, app_config.run_enable);
+      }
+    }
+
+    /* Modbus RTU polling */
+    if (modbus_enabled != 0U)
+    {
+      ModbusRtu_Poll();
     }
   }
   /* USER CODE END 3 */
@@ -522,7 +666,7 @@ void _ttywrch(int ch)   { (void)ch; }
 int fputc(int ch, FILE *f)
 {
   (void)f;
-  HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1U, 100U);
+  HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1U, 100U);
   return ch;
 }
 

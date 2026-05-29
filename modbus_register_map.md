@@ -40,7 +40,7 @@
 |--------|-------------------|--------|-----------------------|
 | 0x0020 | ADC_VREF_MV       | uint16 | 参考电压 mV，默认 2048 |
 | 0x0021 | ADC_DEFAULT_GAIN  | uint16 | 默认增益              |
-| 0x0022 | ADC_DEFAULT_FILTER| uint16 | 默认滤波模式          |
+| 0x0022 | ADC_DEFAULT_FILTER| uint16 | **保留 / 未启用**：固件固定使用 Sinc4 + 约 10 SPS + 50/60Hz 抑制；写入会保存到 EEPROM 但不影响硬件行为 |
 
 ### 0x0030–0x0033 RTC 时间（读写）
 
@@ -107,7 +107,7 @@ FILE_CMD 命令值：
 | +0x0  | FLAGS        | uint16 | [15:8]=enable（0/1），[7:0]=mode（0=单端，1=差分） |
 | +0x1  | INPUTS       | uint16 | [15:8]=positive_input（AIN0–15=0–15），[7:0]=negative_input（AVSS=17） |
 | +0x2  | SENSOR_GAIN  | uint16 | [15:8]=sensor_type，[7:0]=gain               |
-| +0x3  | FILTER       | uint16 | [15:8]=filter_mode，[7:0]=保留               |
+| +0x3  | FILTER       | uint16 | **保留 / 未启用**：[15:8]=filter_mode 位定义保留以便后续扩展，当前固件忽略该字段；所有通道固定为 Sinc4 + 约 10 SPS + 50/60Hz 抑制 |
 | +0x4  | RANGE_H      | uint16 | range_uv 高 16 位                            |
 | +0x5  | RANGE_L      | uint16 | range_uv 低 16 位                            |
 | +0x6  | OFFSET_H     | int16  | calib_offset_uv 高 16 位（有符号）           |
