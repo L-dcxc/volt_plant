@@ -36,6 +36,7 @@
 #include "app_rtc.h"
 #include "ad7124.h"
 #include "storage.h"
+#include "app_config_store.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -45,6 +46,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define APP_POWER_ON_HOLD_TIME_MS 2000U
+#define APP_POWER_ON_CHECK_PERIOD_MS 10U
 
 /* USER CODE END PD */
 
@@ -57,8 +60,10 @@
 
 /* USER CODE BEGIN PV */
 static AD7124_HandleTypeDef had7124;
+static AppConfigStore app_config_store;
+static AppConfigImage app_config;
 static uint8_t ad7124_ready = 0U;
-static uint8_t ad7124_loop_print_enable = 0U;
+static uint8_t ad7124_loop_print_enable = 1U;
 static uint8_t storage_boot_test_enable = 0U;
 static uint32_t ad7124_print_tick = 0U;
 
@@ -98,6 +103,48 @@ static void ResetSdmmcForRetry(void)
   (void)f_mount(NULL, (TCHAR const *)SDPath, 0U);
   (void)HAL_SD_DeInit(&hsd1);
   MX_SDMMC1_SD_Init();
+}
+
+static uint8_t AppPower_CheckOnOffLowAndLatch(void)
+{
+  uint32_t low_start_tick = 0UL;
+
+  HAL_GPIO_WritePin(PWR_ON_GPIO_Port, PWR_ON_Pin, GPIO_PIN_RESET);
+
+  if (HAL_GPIO_ReadPin(ON_OFF_GPIO_Port, ON_OFF_Pin) != GPIO_PIN_RESET)
+  {
+    return 0U;
+  }
+
+  low_start_tick = HAL_GetTick();
+  while ((HAL_GetTick() - low_start_tick) < APP_POWER_ON_HOLD_TIME_MS)
+  {
+    if (HAL_GPIO_ReadPin(ON_OFF_GPIO_Port, ON_OFF_Pin) != GPIO_PIN_RESET)
+    {
+      return 0U;
+    }
+
+    HAL_IWDG_Refresh(&hiwdg);
+    HAL_Delay(APP_POWER_ON_CHECK_PERIOD_MS);
+  }
+
+  HAL_GPIO_WritePin(PWR_ON_GPIO_Port, PWR_ON_Pin, GPIO_PIN_SET);
+  return 1U;
+}
+
+static uint8_t AppPower_ReadOutputData(GPIO_TypeDef *gpio_port, uint16_t gpio_pin)
+{
+  return ((gpio_port->ODR & gpio_pin) != 0U) ? 1U : 0U;
+}
+
+static void AppPower_PrintDiag(const char *tag)
+{
+  printf("[PWR] %s: ON_OFF=%u KEY_PWR=%u PWR_ON_IDR=%u PWR_ON_ODR=%u\r\n",
+         tag,
+         (unsigned)((HAL_GPIO_ReadPin(ON_OFF_GPIO_Port, ON_OFF_Pin) == GPIO_PIN_SET) ? 1U : 0U),
+         (unsigned)((HAL_GPIO_ReadPin(KEY_PWR_GPIO_Port, KEY_PWR_Pin) == GPIO_PIN_SET) ? 1U : 0U),
+         (unsigned)((HAL_GPIO_ReadPin(PWR_ON_GPIO_Port, PWR_ON_Pin) == GPIO_PIN_SET) ? 1U : 0U),
+         (unsigned)AppPower_ReadOutputData(PWR_ON_GPIO_Port, PWR_ON_Pin));
 }
 
 /* USER CODE END 0 */
@@ -148,22 +195,88 @@ int main(void)
   MX_FATFS_Init();
   MX_RTC_Init();
   /* USER CODE BEGIN 2 */
+  {
+    uint8_t power_latched;
+
   /* Latch main power rail: PWR_ON is active-high, must be set ASAP so the
      +2.8V_ADC rail (and other downstream rails) stay on after the boot key
      is released. AD7124 needs this to be powered. */
-  HAL_GPIO_WritePin(PWR_ON_GPIO_Port, PWR_ON_Pin, GPIO_PIN_SET);
+  /* AppPower_PrintDiag("before latch"); */
+  power_latched = AppPower_CheckOnOffLowAndLatch();
+  (void)power_latched;
+  /* AppPower_PrintDiag("after latch"); */
   AD7124_BoardPowerOn(500U);
 
-  printf("OPEN is OK!!!\r\n");
-  printf("PWR_ON latched HIGH\r\n");
-  printf("ADC_PWR_EN set HIGH\r\n");
+  /* printf("OPEN is OK!!!\r\n"); */
+  /* if (power_latched != 0U)
+  {
+    printf("PWR_ON latched HIGH after ON_OFF LOW hold\r\n");
+  }
+  else
+  {
+    printf("PWR_ON not latched, continue without battery power lock\r\n");
+  } */
+  /* printf("ADC_PWR_EN set HIGH\r\n"); */
+  }
+  {
+    HAL_StatusTypeDef config_status;
+    uint32_t enabled_channel_mask;
+
+    /* printf("\r\n=== EEPROM Config Test ===\r\n"); */
+    AppConfigStore_Init(&app_config_store, &hi2c2);
+    config_status = Eeprom_IsReady(&app_config_store.eeprom);
+    if (config_status != HAL_OK)
+    {
+      /* printf("[EEPROM] not ready, HAL status = %d\r\n", (int)config_status); */
+      AppConfig_LoadDefaults(&app_config);
+      /* printf("[CONFIG] using RAM defaults only\r\n"); */
+    }
+    else
+    {
+      /* printf("[EEPROM] device ready\r\n"); */
+      config_status = AppConfigStore_Load(&app_config_store, &app_config);
+      if (config_status != HAL_OK)
+      {
+        /* printf("[CONFIG] load error, HAL status = %d\r\n", (int)config_status); */
+        AppConfig_LoadDefaults(&app_config);
+      }
+      else if (app_config_store.load_source == APP_CONFIG_STORE_LOAD_DEFAULT)
+      {
+        /* printf("[CONFIG] no valid EEPROM config, writing defaults...\r\n"); */
+        HAL_IWDG_Refresh(&hiwdg);
+        config_status = AppConfigStore_SaveDefaults(&app_config_store, &app_config);
+        (void)config_status;
+        /* if (config_status == HAL_OK)
+        {
+          printf("[CONFIG] defaults saved to EEPROM\r\n");
+        }
+        else
+        {
+          printf("[CONFIG] save defaults fail, HAL status = %d\r\n", (int)config_status);
+        } */
+      }
+      else
+      {
+        /* printf("[CONFIG] EEPROM config loaded\r\n"); */
+      }
+    }
+
+    enabled_channel_mask = AppConfig_GetEnabledChannelMask(&app_config);
+    (void)enabled_channel_mask;
+    /* printf("[CONFIG] source=%u slot=%u seq=%lu crc=0x%08lX\r\n", ... ); */
+    /* printf("[CONFIG] device_id=%lu modbus=%u baud=%lu run=%u\r\n", ... ); */
+    /* printf("[CONFIG] sample=%lus record=%lus avg=%u channel_mask=0x%04lX\r\n", ... ); */
+    /* printf("=== EEPROM Config Test done ===\r\n"); */
+    HAL_IWDG_Refresh(&hiwdg);
+  }
   AppRtc_Init();
   {
     char rtc_timestamp[APP_RTC_TIMESTAMP_SIZE];
 
     if (AppRtc_FormatTimestamp(rtc_timestamp, sizeof(rtc_timestamp)) != 0U)
     {
-      printf("[RTC] timestamp: %s\r\n", rtc_timestamp);
+      /* printf("[RTC] timestamp: %s\r\n", rtc_timestamp); */
+      (void)rtc_timestamp;
     }
   }
   if (storage_boot_test_enable != 0U)
@@ -227,59 +340,36 @@ int main(void)
     HAL_StatusTypeDef ad_status;
     HAL_StatusTypeDef cfg_status;
 
-    printf("\r\n\r\n=== AD7124-8 Communication Test ===\r\n");
-    printf("SPI1 ready, resetting AD7124...\r\n");
-
+    (void)ad7124_status;
+    (void)ad7124_control;
+    (void)ad7124_error;
+    /* printf("\r\n\r\n=== AD7124-8 Communication Test ===\r\n"); */
     ad_status = AD7124_Init(&had7124, &hspi1);
-    if (ad_status != HAL_OK)
-    {
-      printf("[FAIL] SPI transfer error, HAL status = %d\r\n", (int)ad_status);
-    }
-    else
+    if (ad_status == HAL_OK)
     {
       ad_status = AD7124_ReadID(&had7124, &ad7124_id);
-      if (ad_status != HAL_OK)
+      if ((ad_status == HAL_OK) && (AD7124_IsDeviceID(ad7124_id) != 0U))
       {
-        printf("[FAIL] ID read error, HAL status = %d\r\n", (int)ad_status);
-      }
-      else
-      {
-        printf("ID register read back: 0x%02X\r\n", (unsigned)ad7124_id);
-        if (AD7124_IsDeviceID(ad7124_id) != 0U)
+        cfg_status = AD7124_ConfigAllSingleEnded(&had7124);
+        if (cfg_status == HAL_OK)
         {
-          printf("[ OK ] AD7124-8 detected, silicon revision 0x%X\r\n",
-                 (unsigned)(ad7124_id & 0x0FU));
-          if (AD7124_ReadStatus(&had7124, &ad7124_status) == HAL_OK)
-          {
-            printf("STATUS register: 0x%02X\r\n", (unsigned)ad7124_status);
-          }
-          if (AD7124_ReadAdcControl(&had7124, &ad7124_control) == HAL_OK)
-          {
-            printf("ADC_CONTROL register: 0x%04X\r\n", (unsigned)ad7124_control);
-          }
-          if (AD7124_ReadError(&had7124, &ad7124_error) == HAL_OK)
-          {
-            printf("ERROR register: 0x%06lX\r\n", (unsigned long)ad7124_error);
-          }
-          cfg_status = AD7124_ConfigAin15SingleEnded(&had7124);
-          if (cfg_status == HAL_OK)
-          {
-            ad7124_ready = 1U;
-            printf("AD7124 channel15 acquisition started: AIN15-AVSS\r\n");
-          }
-          else
-          {
-            printf("[FAIL] AD7124 acquisition config error, HAL status = %d\r\n", (int)cfg_status);
-          }
+          ad7124_ready = 1U;
+          printf("[AD7124] all 16 single-ended channels enabled (AIN0..AIN15 vs AVSS)\r\n");
         }
         else
         {
-          printf("[FAIL] Unexpected ID, upper nibble should be 0x1\r\n");
-          printf("       Check: SPI wiring, CS to GND, +2.8V_ADC, SPI mode 3\r\n");
+          printf("[AD7124] config error, HAL=%d\r\n", (int)cfg_status);
         }
       }
+      else
+      {
+        printf("[AD7124] ID error, HAL=%d ID=0x%02X\r\n", (int)ad_status, (unsigned)ad7124_id);
+      }
     }
-    printf("=== Test done, entering main loop ===\r\n");
+    else
+    {
+      printf("[AD7124] SPI init error, HAL=%d\r\n", (int)ad_status);
+    }
   }
   /* USER CODE END 2 */
 
@@ -295,29 +385,37 @@ int main(void)
     /* USER CODE BEGIN 3 */
     if ((ad7124_loop_print_enable != 0U) && (ad7124_ready != 0U) && ((HAL_GetTick() - ad7124_print_tick) >= 1000U))
     {
-      uint32_t raw_data = 0U;
-      int32_t signed_data = 0;
-      int32_t input_uv = 0;
-      uint8_t sample_status = 0U;
-      uint8_t sample_channel = 0U;
-      HAL_StatusTypeDef sample_st;
+      uint8_t round_idx;
 
       ad7124_print_tick = HAL_GetTick();
-      sample_st = AD7124_ReadSample(&had7124, &raw_data, &signed_data, &sample_status, 200U);
-      if (sample_st == HAL_OK)
+      printf("\r\n[AD7124] --- round @ %lu ms ---\r\n", (unsigned long)ad7124_print_tick);
+      for (round_idx = 0U; round_idx < 16U; round_idx++)
       {
-        sample_channel = AD7124_StatusToChannel(sample_status);
-        input_uv = AD7124_BipolarCodeToMicrovolts(raw_data, AD7124_DEFAULT_VREF_MV, AD7124_DEFAULT_GAIN);
-        printf("[AD7124] CH=%u STATUS=0x%02X RAW=0x%06lX CODE=%ld VIN=%lduV\r\n",
-               (unsigned)sample_channel,
-               (unsigned)sample_status,
-               (unsigned long)raw_data,
-               (long)signed_data,
-               (long)input_uv);
-      }
-      else
-      {
-        printf("[AD7124] sample read error, HAL status = %d\r\n", (int)sample_st);
+        uint32_t raw_data = 0U;
+        int32_t signed_data = 0;
+        int32_t input_uv = 0;
+        uint8_t sample_status = 0U;
+        uint8_t sample_channel = 0U;
+        HAL_StatusTypeDef sample_st;
+
+        sample_st = AD7124_ReadSample(&had7124, &raw_data, &signed_data, &sample_status, 500U);
+        if (sample_st == HAL_OK)
+        {
+          sample_channel = AD7124_StatusToChannel(sample_status);
+          input_uv = AD7124_BipolarCodeToMicrovolts(raw_data, AD7124_DEFAULT_VREF_MV, AD7124_DEFAULT_GAIN);
+          printf("  CH%02u STATUS=0x%02X RAW=0x%06lX CODE=%ld VIN=%ld uV\r\n",
+                 (unsigned)sample_channel,
+                 (unsigned)sample_status,
+                 (unsigned long)raw_data,
+                 (long)signed_data,
+                 (long)input_uv);
+        }
+        else
+        {
+          printf("  CH?? sample error, HAL=%d\r\n", (int)sample_st);
+          break;
+        }
+        HAL_IWDG_Refresh(&hiwdg);
       }
     }
   }
@@ -340,11 +438,18 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
+  /** Configure LSE Drive Capability
+  */
+  HAL_PWR_EnableBkUpAccess();
+  __HAL_RCC_LSEDRIVE_CONFIG(RCC_LSEDRIVE_LOW);
+
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE
+                              |RCC_OSCILLATORTYPE_LSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.LSEState = RCC_LSE_ON;
   RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;

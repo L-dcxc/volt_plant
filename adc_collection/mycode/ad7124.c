@@ -228,6 +228,45 @@ HAL_StatusTypeDef AD7124_ConfigAin15SingleEnded(AD7124_HandleTypeDef *dev)
   return AD7124_WriteRegister(dev, AD7124_REG_ADC_CONTROL, AD7124_ADC_CONTROL_DATA_STATUS, 2U);
 }
 
+HAL_StatusTypeDef AD7124_ConfigAllSingleEnded(AD7124_HandleTypeDef *dev)
+{
+  HAL_StatusTypeDef st;
+  uint8_t i;
+  uint32_t channel_value;
+
+  if ((dev == NULL) || (dev->hspi == NULL))
+  {
+    return HAL_ERROR;
+  }
+
+  for (i = 0U; i < 16U; i++)
+  {
+    channel_value = AD7124_CHANNEL_ENABLE |
+                    AD7124_CHANNEL_SETUP0 |
+                    ((uint32_t)i << 5) |
+                    (uint32_t)AD7124_AIN_AVSS;
+    st = AD7124_WriteRegister(dev, (uint8_t)(AD7124_REG_CHANNEL_0 + i), channel_value, 2U);
+    if (st != HAL_OK)
+    {
+      return st;
+    }
+  }
+
+  st = AD7124_WriteRegister(dev, AD7124_REG_CONFIG_0, 0x0800U, 2U);
+  if (st != HAL_OK)
+  {
+    return st;
+  }
+
+  st = AD7124_WriteRegister(dev, AD7124_REG_FILTER_0, 0x060040U, 3U);
+  if (st != HAL_OK)
+  {
+    return st;
+  }
+
+  return AD7124_WriteRegister(dev, AD7124_REG_ADC_CONTROL, AD7124_ADC_CONTROL_DATA_STATUS, 2U);
+}
+
 HAL_StatusTypeDef AD7124_WaitDataReady(AD7124_HandleTypeDef *dev, uint32_t timeout_ms)
 {
   uint32_t start_tick;

@@ -1399,6 +1399,21 @@
               <FileType>1</FileType>
               <FilePath>..\mycode\app_rtc.c</FilePath>
             </File>
+            <File>
+              <FileName>app_config.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\mycode\app_config.c</FilePath>
+            </File>
+            <File>
+              <FileName>eeprom.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\mycode\eeprom.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_config_store.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\mycode\app_config_store.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

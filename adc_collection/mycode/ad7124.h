@@ -56,6 +56,7 @@ HAL_StatusTypeDef AD7124_ReadAdcControl(AD7124_HandleTypeDef *dev, uint16_t *con
 HAL_StatusTypeDef AD7124_ReadError(AD7124_HandleTypeDef *dev, uint32_t *error);
 HAL_StatusTypeDef AD7124_ConfigDefaultChannel0(AD7124_HandleTypeDef *dev);
 HAL_StatusTypeDef AD7124_ConfigAin15SingleEnded(AD7124_HandleTypeDef *dev);
+HAL_StatusTypeDef AD7124_ConfigAllSingleEnded(AD7124_HandleTypeDef *dev);
 HAL_StatusTypeDef AD7124_WaitDataReady(AD7124_HandleTypeDef *dev, uint32_t timeout_ms);
 HAL_StatusTypeDef AD7124_ReadData(AD7124_HandleTypeDef *dev, uint32_t *raw_data);
 HAL_StatusTypeDef AD7124_ReadDataWithStatus(AD7124_HandleTypeDef *dev, uint32_t *raw_data, uint8_t *status);
