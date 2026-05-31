@@ -67,7 +67,7 @@ static AppConfigStore app_config_store;
 static AppConfigImage app_config;
 static uint8_t ad7124_ready = 0U;
 static uint8_t ad7124_loop_print_enable = 1U;
-static uint8_t storage_boot_test_enable = 0U;
+static uint8_t storage_boot_test_enable = 1U;
 static uint32_t ad7124_print_tick = 0U;
 static uint32_t led_blink_tick = 0U;
 static uint8_t modbus_enabled = 1U;
@@ -318,7 +318,20 @@ int main(void)
     }
 
     enabled_channel_mask = AppConfig_GetEnabledChannelMask(&app_config);
-    (void)enabled_channel_mask;
+    printf("[CONFIG] Enabled channel mask: 0x%04lX\r\n", (unsigned long)enabled_channel_mask);
+    for (uint8_t ch = 0U; ch < 16U; ch++)
+    {
+      if (app_config.channels[ch].enable != 0U)
+      {
+        printf("[CONFIG] CH%02u: enable=%u mode=%u pos=%u neg=%u gain=%u\r\n",
+               (unsigned)ch,
+               (unsigned)app_config.channels[ch].enable,
+               (unsigned)app_config.channels[ch].mode,
+               (unsigned)app_config.channels[ch].positive_input,
+               (unsigned)app_config.channels[ch].negative_input,
+               (unsigned)app_config.channels[ch].gain);
+      }
+    }
     /* printf("[CONFIG] source=%u slot=%u seq=%lu crc=0x%08lX\r\n", ... ); */
     /* printf("[CONFIG] device_id=%lu modbus=%u baud=%lu run=%u\r\n", ... ); */
     /* printf("[CONFIG] sample=%lus record=%lus avg=%u channel_mask=0x%04lX\r\n", ... ); */
@@ -462,28 +475,36 @@ int main(void)
     /* Long-press shutdown: hold ON_OFF low for 3s to cut power */
     AppPower_PollShutdown();
 
-    /* 临时：三灯常亮，用于调节限流电阻测试亮度。
-       调试完成后恢复下方注释掉的心跳闪烁逻辑。 */
-    HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
-
-    /* Heartbeat: blink green LED ~2 Hz. Tick-gated so it stays visible now
-       that the loop runs at full speed (no HAL_Delay pacing).
+    /* Heartbeat: blink green LED ~2 Hz */
     if ((HAL_GetTick() - led_blink_tick) >= 250U)
     {
       led_blink_tick = HAL_GetTick();
       HAL_GPIO_TogglePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin);
     }
-    */
 
     if ((ad7124_loop_print_enable != 0U) && (ad7124_ready != 0U) && ((HAL_GetTick() - ad7124_print_tick) >= 1000U))
     {
       uint8_t round_idx;
+      uint8_t enabled_count = 0U;
+      uint8_t samples_read = 0U;
+
+      /* Count enabled channels */
+      for (round_idx = 0U; round_idx < 16U; round_idx++)
+      {
+        if (app_config.channels[round_idx].enable != 0U)
+        {
+          enabled_count++;
+        }
+      }
 
       ad7124_print_tick = HAL_GetTick();
-      printf("\r\n[AD7124] --- round @ %lu ms ---\r\n", (unsigned long)ad7124_print_tick);
-      for (round_idx = 0U; round_idx < 16U; round_idx++)
+      printf("\r\n[AD7124] --- round @ %lu ms (enabled channels: %u) ---\r\n",
+             (unsigned long)ad7124_print_tick, (unsigned)enabled_count);
+
+      /* Read samples until we get all enabled channels or timeout.
+         AD7124 in continuous mode cycles through enabled channels,
+         so we need to read until we've seen all of them. */
+      while (samples_read < enabled_count && samples_read < 32U) /* Safety limit */
       {
         uint32_t raw_data = 0U;
         int32_t signed_data = 0;
@@ -540,10 +561,13 @@ int main(void)
           {
             AppModbus_UpdateChannelData(sample_channel, raw_data, input_uv);
           }
+
+          samples_read++;
         }
         else
         {
-          printf("  CH?? sample error, HAL=%d\r\n", (int)sample_st);
+          printf("  CH?? sample error, HAL=%d (read %u/%u samples)\r\n",
+                 (int)sample_st, (unsigned)samples_read, (unsigned)enabled_count);
           break;
         }
         HAL_IWDG_Refresh(&hiwdg);

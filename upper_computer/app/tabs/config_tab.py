@@ -22,17 +22,25 @@ _HELP_HTML = """
 
 <h3>关键概念</h3>
 <ul>
-<li><b>AIN 引脚 ≠ 通道</b>。AIN0..AIN15 是 16 个物理引脚；CH0..CH15 是 16 个可编程"测量定义槽位"。每个 CH 单独决定用哪对 AIN、哪种模式、哪种增益/滤波。AIN 没有"使能"概念，只有 CH 有。</li>
-<li><b>单端模式</b>：CH 的读数 = V(正输入 AIN) − V(AVSS)。负输入选 <code>AVSS(17)</code>。</li>
-<li><b>差分模式</b>：CH 的读数 = V(正输入) − V(负输入)，有符号。差分的真正价值是<b>抗共模干扰</b>（远距离线缆抗噪），不是省引脚。</li>
+<li><b>通道与AIN固定对应</b>：通道n固定使用AINn（通道0用AIN0，通道1用AIN1，以此类推）。正输入已自动固定，无需手动选择。</li>
+<li><b>单端模式</b>：CH 的读数 = V(正输入 AIN) − V(AVSS)。负输入自动设为 <code>AVSS(17)</code>。</li>
+<li><b>差分模式</b>：CH 的读数 = V(正输入) − V(负输入)，有符号。<b>硬件限制：差分只能使用相邻的AIN配对</b>（AIN0↔AIN1, AIN2↔AIN3, ...）。</li>
+<li><b>差分互斥规则</b>：
+  <ul>
+    <li>偶数通道（0,2,4...）设为差分时，自动使用下一个AIN作为负输入，并禁用下一个奇数通道。</li>
+    <li>奇数通道（1,3,5...）设为差分时，自动使用上一个AIN作为负输入，并禁用上一个偶数通道。</li>
+    <li>被禁用的通道整行显示为灰色，不可编辑。</li>
+  </ul>
+</li>
 </ul>
 
 <h3>字段含义</h3>
 <table border="1" cellpadding="4" cellspacing="0">
 <tr><th>字段</th><th>说明</th></tr>
 <tr><td>使能</td><td>勾选则该通道参与采样轮次；未勾选会被序列器跳过。</td></tr>
-<tr><td>模式</td><td>单端 / 差分。单端时负输入必须为 AVSS。</td></tr>
-<tr><td>正/负输入</td><td>选择该通道接到哪个 AIN 引脚。</td></tr>
+<tr><td>模式</td><td>单端 / 差分。切换模式时会自动调整负输入并检查互斥关系。</td></tr>
+<tr><td>正输入</td><td>已固定为AINn（通道n使用AINn），不可修改。</td></tr>
+<tr><td>负输入</td><td>单端模式固定为AVSS(17)；差分模式根据硬件配对规则自动设置，不可手动修改。</td></tr>
 <tr><td>增益 (PGA)</td><td><b>硬件模拟放大</b>，把信号实打实地放大后再送 ADC。<br>
 满量程 = Vref / 增益。例如 Vref=2.048V、增益=128 时满量程 ±16 mV，<b>用于测量 0–2mV 这类微弱信号</b>。<br>
 超量程只会饱和（读数卡在最大/最小码），<b>不会损坏芯片</b>。损坏只发生在 AIN 电压超出供电轨。</td></tr>
@@ -51,10 +59,17 @@ _HELP_HTML = """
 <li>修改 Modbus 地址或波特率后，需要 <b>保存 + 复位</b> 才生效。</li>
 </ol>
 
+<h3>差分配置示例</h3>
+<ul>
+<li><b>场景1</b>：通道0设为差分 → 自动使用AIN0(正)-AIN1(负)，通道1被禁用（灰色）。</li>
+<li><b>场景2</b>：通道1设为差分 → 自动使用AIN1(正)-AIN0(负)，通道0被禁用（灰色）。</li>
+<li><b>场景3</b>：通道0单端、通道1单端 → 两者独立工作，互不影响。</li>
+</ul>
+
 <h3>注意</h3>
 <ul>
 <li>sensor_type 字段固件内部使用，本页未暴露编辑。</li>
-<li>差分模式下 6 路传感器最多占用 12 个 AIN 引脚，请和硬件分配核对。</li>
+<li>差分配对由硬件电路限制，只能使用相邻的AIN（0↔1, 2↔3, 4↔5, ...）。</li>
 </ul>
 """
 
@@ -163,14 +178,19 @@ class ConfigTab(QWidget):
 
             w["mode"] = NoWheelComboBox()
             w["mode"].addItems(["单端", "差分"])
+            w["mode"].currentIndexChanged.connect(lambda idx, ch=ch: self._on_mode_changed(ch, idx))
             self.table.setCellWidget(ch, 2, w["mode"])
 
             w["pos"] = NoWheelComboBox()
             w["pos"].addItems(input_choices)
+            w["pos"].setCurrentIndex(ch)
+            w["pos"].setEnabled(False)
             self.table.setCellWidget(ch, 3, w["pos"])
 
             w["neg"] = NoWheelComboBox()
             w["neg"].addItems(input_choices)
+            w["neg"].setCurrentIndex(16)
+            w["neg"].setEnabled(False)
             self.table.setCellWidget(ch, 4, w["neg"])
 
             w["gain"] = NoWheelComboBox()
@@ -196,8 +216,8 @@ class ConfigTab(QWidget):
             self.ch_widgets.append(w)
 
         v.addWidget(self.table, 1)
-        hint = QLabel('说明：sensor_type 固件内部使用，本页不直接编辑；'
-                      '负输入选 AVSS(17) 为单端。点右上角“说明书”了解字段含义。')
+        hint = QLabel('说明：通道n固定使用AINn；差分模式下相邻通道互斥（0↔1, 2↔3, ...）。'
+                      '点右上角"说明书"了解详细规则。')
         v.addWidget(hint)
         return box
 
@@ -227,6 +247,103 @@ class ConfigTab(QWidget):
         self.btn_read.setEnabled(connected)
         self.btn_write.setEnabled(connected)
         self.btn_write_save.setEnabled(connected)
+
+    # ── 差分模式互斥逻辑 ────────────────────────────────────
+    def _on_mode_changed(self, ch, mode_idx):
+        """当通道模式改变时，自动调整负输入并更新互斥通道的状态。
+
+        mode_idx: 0=单端, 1=差分
+        """
+        w = self.ch_widgets[ch]
+        is_differential = (mode_idx == 1)
+
+        if is_differential:
+            # 差分模式：根据通道奇偶性设置负输入
+            if ch % 2 == 0:
+                # 偶数通道：负输入 = AIN(ch+1)
+                w["neg"].setCurrentIndex(ch + 1)
+            else:
+                # 奇数通道：负输入 = AIN(ch-1)
+                w["neg"].setCurrentIndex(ch - 1)
+        else:
+            # 单端模式：负输入 = AVSS(17)
+            w["neg"].setCurrentIndex(16)
+
+        # 更新配对通道的使能状态
+        self._update_channel_pair_state(ch)
+
+    def _update_channel_pair_state(self, changed_ch):
+        """更新与changed_ch配对的通道的使能状态。
+
+        规则：
+        - 如果changed_ch是差分模式，禁用其配对通道
+        - 如果changed_ch是单端模式，检查配对通道是否也是单端，如果是则启用
+        """
+        # 找到配对通道
+        if changed_ch % 2 == 0:
+            pair_ch = changed_ch + 1
+        else:
+            pair_ch = changed_ch - 1
+
+        # 检查配对通道是否存在
+        if pair_ch < 0 or pair_ch >= reg.CHANNEL_COUNT:
+            return
+
+        changed_w = self.ch_widgets[changed_ch]
+        pair_w = self.ch_widgets[pair_ch]
+
+        changed_is_diff = (changed_w["mode"].currentIndex() == 1)
+        pair_is_diff = (pair_w["mode"].currentIndex() == 1)
+
+        # 如果任一通道是差分模式，则禁用另一个通道
+        if changed_is_diff or pair_is_diff:
+            # 禁用配对通道
+            self._set_channel_enabled(pair_ch, False)
+        else:
+            # 两者都是单端模式，启用配对通道
+            self._set_channel_enabled(pair_ch, True)
+
+    def _set_channel_enabled(self, ch, enabled):
+        """设置通道的可编辑状态（启用/禁用整行）。"""
+        w = self.ch_widgets[ch]
+
+        # 设置所有控件的启用状态
+        w["enable"].setEnabled(enabled)
+        w["mode"].setEnabled(enabled)
+        # pos 和 neg 始终禁用（自动管理）
+        w["gain"].setEnabled(enabled)
+        w["range"].setEnabled(enabled)
+        w["offset"].setEnabled(enabled)
+        w["scale"].setEnabled(enabled)
+        w["warmup"].setEnabled(enabled)
+
+        # 设置行的视觉效果（灰色背景表示禁用）
+        for col in range(self.table.columnCount()):
+            item = self.table.item(ch, col)
+            if item:
+                if enabled:
+                    item.setBackground(Qt.white)
+                else:
+                    item.setBackground(Qt.lightGray)
+
+    def _refresh_all_channel_states(self):
+        """刷新所有通道的互斥状态（用于从设备读取配置后）。"""
+        # 先重置所有通道为启用状态
+        for ch in range(reg.CHANNEL_COUNT):
+            self._set_channel_enabled(ch, True)
+
+        # 然后根据差分模式禁用相应的配对通道
+        for ch in range(reg.CHANNEL_COUNT):
+            w = self.ch_widgets[ch]
+            if w["mode"].currentIndex() == 1:  # 差分模式
+                # 找到配对通道并禁用
+                if ch % 2 == 0:
+                    pair_ch = ch + 1
+                else:
+                    pair_ch = ch - 1
+
+                if 0 <= pair_ch < reg.CHANNEL_COUNT:
+                    self._set_channel_enabled(pair_ch, False)
 
     # ── 增益值 <-> 下拉索引 ─────────────────────────────────
     @staticmethod
@@ -267,6 +384,9 @@ class ConfigTab(QWidget):
             r = c.read_holding(base, reg.CHANNEL_REG_COUNT)
             self._set_channel_widgets(ch, r)
 
+        # 读取完成后刷新所有通道的互斥状态
+        self._refresh_all_channel_states()
+
     def _set_channel_widgets(self, ch, r):
         # filter_mode（CH_OFF_FILTER）字段固件未启用，不刷新到 UI
         w = self.ch_widgets[ch]
@@ -275,9 +395,23 @@ class ConfigTab(QWidget):
         _stype, gain = reg.unpack_bytes_hi_lo(r[reg.CH_OFF_SENSOR_GAIN])
 
         w["enable"].setChecked(bool(enable))
+        # 暂时断开信号，避免触发 _on_mode_changed
+        w["mode"].blockSignals(True)
         w["mode"].setCurrentIndex(1 if mode == 1 else 0)
-        w["pos"].setCurrentIndex(self._input_to_index(pos))
-        w["neg"].setCurrentIndex(self._input_to_index(neg))
+        w["mode"].blockSignals(False)
+
+        # 正输入固定为 AINn，负输入根据模式自动设置
+        w["pos"].setCurrentIndex(ch)
+        if mode == 1:
+            # 差分模式：根据硬件配对规则设置负输入
+            if ch % 2 == 0:
+                w["neg"].setCurrentIndex(ch + 1)
+            else:
+                w["neg"].setCurrentIndex(ch - 1)
+        else:
+            # 单端模式：负输入为 AVSS
+            w["neg"].setCurrentIndex(16)
+
         w["gain"].setCurrentIndex(self._gain_to_index(gain))
         w["range"].setValue(reg.join_u32(r[reg.CH_OFF_RANGE_H], r[reg.CH_OFF_RANGE_L]))
         w["offset"].setValue(reg.join_s32(r[reg.CH_OFF_OFFSET_H], r[reg.CH_OFF_OFFSET_L]))
@@ -333,8 +467,21 @@ class ConfigTab(QWidget):
         w = self.ch_widgets[ch]
         enable = 1 if w["enable"].isChecked() else 0
         mode = w["mode"].currentIndex()  # 0 单端 1 差分
-        pos = self._index_to_input(w["pos"].currentIndex())
-        neg = self._index_to_input(w["neg"].currentIndex())
+
+        # 正输入固定为 AINn
+        pos = ch
+
+        # 负输入根据模式自动设置
+        if mode == 1:
+            # 差分模式：根据硬件配对规则
+            if ch % 2 == 0:
+                neg = ch + 1
+            else:
+                neg = ch - 1
+        else:
+            # 单端模式：AVSS
+            neg = reg.ADC_INPUT_AVSS
+
         gain = reg.GAIN_VALUES[w["gain"].currentIndex()]
         range_uv = w["range"].value()
         offset = w["offset"].value()
