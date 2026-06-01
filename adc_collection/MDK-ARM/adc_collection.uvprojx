@@ -1429,6 +1429,21 @@
               <FileType>1</FileType>
               <FilePath>..\mycode\ad7124_config.c</FilePath>
             </File>
+            <File>
+              <FileName>recorder.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\mycode\recorder.c</FilePath>
+            </File>
+            <File>
+              <FileName>file_browser.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\mycode\file_browser.c</FilePath>
+            </File>
+            <File>
+              <FileName>ymodem.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\mycode\ymodem.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

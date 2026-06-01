@@ -318,6 +318,37 @@ void ModbusRtu_RxCallback(uint8_t byte)
   RingBuf_Write(&g_modbus.rx_buf, byte);
 }
 
+/* Pause/Resume the RXNE interrupt so another protocol (e.g. YMODEM) can use
+   USART1 in polled mode. We do NOT touch the NVIC line — the IRQ vector still
+   runs, but the RXNE branch in stm32l4xx_it.c checks RXNEIE and exits cleanly
+   while RXNE is masked. */
+void ModbusRtu_PauseRx(void)
+{
+  if (g_modbus.huart == NULL)
+    return;
+  __HAL_UART_DISABLE_IT(g_modbus.huart, UART_IT_RXNE);
+  g_modbus.rx_buf.head = 0U;
+  g_modbus.rx_buf.tail = 0U;
+  g_modbus.frame_len = 0U;
+}
+
+void ModbusRtu_ResumeRx(void)
+{
+  if (g_modbus.huart == NULL)
+    return;
+  /* Drain any pending RDR byte and clear overrun before reopening RXNE. */
+  __HAL_UART_CLEAR_OREFLAG(g_modbus.huart);
+  if (__HAL_UART_GET_FLAG(g_modbus.huart, UART_FLAG_RXNE))
+  {
+    (void)g_modbus.huart->Instance->RDR;
+  }
+  g_modbus.rx_buf.head = 0U;
+  g_modbus.rx_buf.tail = 0U;
+  g_modbus.frame_len = 0U;
+  g_modbus.rx_buf.last_rx_tick = HAL_GetTick();
+  __HAL_UART_ENABLE_IT(g_modbus.huart, UART_IT_RXNE);
+}
+
 /* Poll for frame reception and processing */
 void ModbusRtu_Poll(void)
 {

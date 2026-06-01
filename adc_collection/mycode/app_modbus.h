@@ -46,6 +46,13 @@ uint8_t AppModbus_ReadInputRegisters(uint16_t start_addr, uint16_t count, uint16
 uint8_t AppModbus_WriteSingleRegister(uint16_t addr, uint16_t value);
 uint8_t AppModbus_WriteMultipleRegisters(uint16_t start_addr, uint16_t count, const uint16_t *values);
 
+/* File transfer hand-off to main loop. START sets a pending flag that
+   main.c polls after ModbusRtu_Poll, ensuring the FC06 ACK is fully sent
+   before USART1 is repurposed for YMODEM. */
+uint8_t AppModbus_FileXferStartPending(void);
+void    AppModbus_FileXferClearPending(void);
+void    AppModbus_FileXferSetState(uint16_t state, uint16_t err);
+
 #ifdef __cplusplus
 }
 #endif

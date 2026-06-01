@@ -1,5 +1,6 @@
 #include "app_modbus.h"
 #include "modbus_rtu.h"
+#include "file_browser.h"
 #include <string.h>
 
 /* Global state */
@@ -13,6 +14,12 @@ static uint16_t g_system_status = 0U;
 static uint16_t g_last_error_code = 0U;
 static uint8_t g_control_force[APP_CONFIG_CONTROL_COUNT] = {0U, 0U, 0U, 0U};
 static AppModbusReconfigureCb g_reconfigure_cb = NULL;
+
+/* File transfer state (see modbus_register_map.md §0x0060-0x0074). */
+static uint16_t g_file_xfer_state = 0U;
+static uint16_t g_file_index = 0U;
+static uint16_t g_file_err = 0U;
+static uint8_t  g_file_xfer_pending = 0U;
 
 /* Initialize */
 void AppModbus_Init(AppConfigImage *config, AppConfigStore *store)
@@ -176,9 +183,9 @@ uint8_t AppModbus_ReadHoldingRegisters(uint16_t start_addr, uint16_t count, uint
       else out_regs[i] = 0U; /* Reserved */
     }
 
-    /* 0x0060–0x0061: File Transfer Control (placeholder) */
-    else if (addr == 0x0060U) out_regs[i] = 0U; /* FILE_CMD */
-    else if (addr == 0x0061U) out_regs[i] = 0U; /* FILE_INDEX */
+    /* 0x0060–0x0061: File Transfer Control */
+    else if (addr == 0x0060U) out_regs[i] = 0U;            /* FILE_CMD: read returns 0 */
+    else if (addr == 0x0061U) out_regs[i] = g_file_index;  /* FILE_INDEX */
 
     else
       return MODBUS_EX_ILLEGAL_DATA_ADDRESS;
@@ -244,14 +251,45 @@ uint8_t AppModbus_ReadInputRegisters(uint16_t start_addr, uint16_t count, uint16
     else if (addr == 0x004DU) out_regs[i] = g_last_sample_time.second;
     else if (addr >= 0x004EU && addr <= 0x004FU) out_regs[i] = 0U; /* Reserved */
 
-    /* 0x0050–0x0053: System Status */
-    else if (addr == 0x0050U) out_regs[i] = g_system_status;
+    /* 0x0050–0x0053: System Status. RUNNING bit reflects the live config so
+       the host sees state changes immediately after writing HR_RUN_ENABLE,
+       without having to wait for the next sample cycle to refresh it. */
+    else if (addr == 0x0050U)
+    {
+      uint16_t s = g_system_status & ~(uint16_t)(1U << 4);
+      if (g_config != NULL && g_config->run_enable != 0U) s |= (uint16_t)(1U << 4);
+      out_regs[i] = s;
+    }
     else if (addr == 0x0051U) out_regs[i] = (uint16_t)(HAL_GetTick() >> 16);
     else if (addr == 0x0052U) out_regs[i] = (uint16_t)(HAL_GetTick() & 0xFFFFU);
     else if (addr == 0x0053U) out_regs[i] = g_last_error_code;
 
-    /* 0x0060–0x0074: File Transfer Status (placeholder) */
-    else if (addr >= 0x0060U && addr <= 0x0074U) out_regs[i] = 0U;
+    /* 0x0060–0x0074: File Transfer Status */
+    else if (addr == 0x0060U) out_regs[i] = g_file_xfer_state;
+    else if (addr == 0x0061U) out_regs[i] = FileBrowser_GetCount();
+    else if (addr == 0x0062U || addr == 0x0063U)
+    {
+      const FileBrowserEntry *e = FileBrowser_GetSelected();
+      uint32_t size = (e != NULL) ? e->size : 0U;
+      out_regs[i] = (addr == 0x0062U) ? (uint16_t)(size >> 16) : (uint16_t)(size & 0xFFFFU);
+    }
+    else if (addr >= 0x0064U && addr <= 0x0073U)
+    {
+      const FileBrowserEntry *e = FileBrowser_GetSelected();
+      uint16_t name_idx = addr - 0x0064U;
+      uint8_t hi = 0U;
+      uint8_t lo = 0U;
+      if (e != NULL)
+      {
+        uint16_t name_len = (uint16_t)strlen(e->name);
+        uint16_t pos_hi = (uint16_t)(name_idx * 2U);
+        uint16_t pos_lo = (uint16_t)(name_idx * 2U + 1U);
+        if (pos_hi < name_len) hi = (uint8_t)e->name[pos_hi];
+        if (pos_lo < name_len) lo = (uint8_t)e->name[pos_lo];
+      }
+      out_regs[i] = ((uint16_t)hi << 8) | lo;
+    }
+    else if (addr == 0x0074U) out_regs[i] = g_file_err;
 
     else
       return MODBUS_EX_ILLEGAL_DATA_ADDRESS;
@@ -350,10 +388,66 @@ uint8_t AppModbus_WriteSingleRegister(uint16_t addr, uint16_t value)
     g_control_force[ctrl_idx] = (uint8_t)value;
   }
 
-  /* 0x0060–0x0061: File Transfer Control (placeholder) */
-  else if (addr == 0x0060U || addr == 0x0061U)
+  /* 0x0061: FILE_INDEX (stage the index for the next SELECT/START/DELETE) */
+  else if (addr == 0x0061U)
   {
-    return MODBUS_EX_SLAVE_DEVICE_FAILURE; /* Not implemented */
+    g_file_index = value;
+  }
+
+  /* 0x0060: FILE_CMD (drives the file browser state machine) */
+  else if (addr == 0x0060U)
+  {
+    if (value == 0x0001U) /* OPEN_DIR */
+    {
+      FRESULT fr = FileBrowser_OpenDir();
+      if (fr != FR_OK)
+      {
+        g_file_xfer_state = 5U;
+        g_file_err = 0x0004U;
+        return MODBUS_EX_SLAVE_DEVICE_FAILURE;
+      }
+      g_file_xfer_state = 1U;
+      g_file_err = 0U;
+    }
+    else if (value == 0x0002U) /* SELECT */
+    {
+      if (g_file_xfer_state < 1U)
+        return MODBUS_EX_ILLEGAL_DATA_VALUE;
+      if (FileBrowser_Select(g_file_index) == 0U)
+        return MODBUS_EX_ILLEGAL_DATA_VALUE;
+      g_file_xfer_state = 2U;
+      g_file_err = 0U;
+    }
+    else if (value == 0x0003U) /* START */
+    {
+      if (g_file_xfer_state != 2U)
+        return MODBUS_EX_ILLEGAL_DATA_VALUE;
+      g_file_xfer_pending = 1U;
+      g_file_xfer_state = 3U;
+      g_file_err = 0U;
+      /* Yield USART1 RX immediately so the host's 'C' poll byte cannot be
+         swallowed by the Modbus IRQ between now and the time main.c reaches
+         YModem_SendFile. TX of the FC06 ACK is unaffected (polled by HAL). */
+      ModbusRtu_PauseRx();
+    }
+    else if (value == 0x0004U) /* DELETE */
+    {
+      if (g_file_xfer_state != 2U)
+        return MODBUS_EX_ILLEGAL_DATA_VALUE;
+      if (FileBrowser_DeleteSelected() != FR_OK)
+      {
+        g_file_err = 0x0004U;
+        return MODBUS_EX_SLAVE_DEVICE_FAILURE;
+      }
+      /* Refresh snapshot so subsequent indexes are consistent */
+      (void)FileBrowser_OpenDir();
+      g_file_xfer_state = 1U;
+      g_file_err = 0U;
+    }
+    else
+    {
+      return MODBUS_EX_ILLEGAL_DATA_VALUE;
+    }
   }
 
   /* Multi-register fields require FC16 */
@@ -541,4 +635,21 @@ uint8_t AppModbus_WriteMultipleRegisters(uint16_t start_addr, uint16_t count, co
   }
 
   return 0U; /* Success */
+}
+
+/* File transfer hand-off helpers (used by main.c after Modbus poll). */
+uint8_t AppModbus_FileXferStartPending(void)
+{
+  return g_file_xfer_pending;
+}
+
+void AppModbus_FileXferClearPending(void)
+{
+  g_file_xfer_pending = 0U;
+}
+
+void AppModbus_FileXferSetState(uint16_t state, uint16_t err)
+{
+  g_file_xfer_state = state;
+  g_file_err = err;
 }

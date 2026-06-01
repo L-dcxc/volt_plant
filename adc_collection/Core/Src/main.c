@@ -39,6 +39,9 @@
 #include "app_config_store.h"
 #include "modbus_rtu.h"
 #include "app_modbus.h"
+#include "recorder.h"
+#include "file_browser.h"
+#include "ymodem.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -66,7 +69,7 @@ static AD7124_HandleTypeDef had7124;
 static AppConfigStore app_config_store;
 static AppConfigImage app_config;
 static uint8_t ad7124_ready = 0U;
-static uint8_t ad7124_loop_print_enable = 1U;
+static uint8_t ad7124_loop_print_enable = 0U;
 static uint8_t storage_boot_test_enable = 1U;
 static uint32_t ad7124_print_tick = 0U;
 static uint32_t led_blink_tick = 0U;
@@ -74,6 +77,8 @@ static uint8_t modbus_enabled = 1U;
 static uint8_t eeprom_ok = 0U;
 static uint8_t rtc_ok = 0U;
 static uint8_t sd_ok = 0U;
+static uint32_t sample_tick = 0U;
+static uint8_t prev_run_enable = 0U;
 
 /* USER CODE END PV */
 
@@ -444,7 +449,19 @@ int main(void)
   /* Update subsystem status flags */
   eeprom_ok = (Eeprom_IsReady(&app_config_store.eeprom) == HAL_OK) ? 1U : 0U;
   rtc_ok = 1U; /* RTC initialized successfully if we got here */
-  sd_ok = 0U;  /* SD not tested in normal boot */
+
+  /* Ensure SD is powered + mounted for the recorder. If the boot self-test
+     already ran, power is on; otherwise turn it on now. */
+  if (Storage_IsPowerEnabled() == 0U)
+  {
+    Storage_PowerOn(500U);
+  }
+  sd_ok = (Storage_Mount() == FR_OK) ? 1U : 0U;
+
+  /* Bring up the periodic recorder (accumulators + day-rotated SD writer) */
+  Recorder_Init(&app_config);
+  sample_tick = HAL_GetTick();
+  prev_run_enable = app_config.run_enable;
 
   /* Initialize Modbus RTU */
   if (ad7124_ready != 0U && modbus_enabled != 0U)
@@ -482,59 +499,67 @@ int main(void)
       HAL_GPIO_TogglePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin);
     }
 
-    if ((ad7124_loop_print_enable != 0U) && (ad7124_ready != 0U) && ((HAL_GetTick() - ad7124_print_tick) >= 1000U))
+    /* Edge-detect run_enable 0->1: reset cadence so a freshly-started run
+       waits a full sample_interval before its first scan, and recorder state
+       starts clean. */
+    if ((app_config.run_enable != 0U) && (prev_run_enable == 0U))
     {
-      uint8_t round_idx;
-      uint8_t enabled_count = 0U;
-      uint8_t samples_read = 0U;
+      sample_tick = HAL_GetTick();
+      Recorder_ResetTiming();
+    }
+    prev_run_enable = app_config.run_enable;
 
-      /* Count enabled channels */
-      for (round_idx = 0U; round_idx < 16U; round_idx++)
+    /* Periodic AD7124 scan + recorder feed. AD7124 stays powered when paused;
+       only the schedule + Modbus realtime updates + SD writes are gated. */
+    if ((app_config.run_enable != 0U) && (ad7124_ready != 0U))
+    {
+      uint32_t interval_ms = app_config.sample_interval_sec * 1000UL;
+      if (interval_ms == 0UL)
       {
-        if (app_config.channels[round_idx].enable != 0U)
-        {
-          enabled_count++;
-        }
+        interval_ms = 1000UL;
       }
 
-      ad7124_print_tick = HAL_GetTick();
-      printf("\r\n[AD7124] --- round @ %lu ms (enabled channels: %u) ---\r\n",
-             (unsigned long)ad7124_print_tick, (unsigned)enabled_count);
-
-      /* Read samples until we get all enabled channels or timeout.
-         AD7124 in continuous mode cycles through enabled channels,
-         so we need to read until we've seen all of them. */
-      while (samples_read < enabled_count && samples_read < 32U) /* Safety limit */
+      if ((HAL_GetTick() - sample_tick) >= interval_ms)
       {
-        uint32_t raw_data = 0U;
-        int32_t signed_data = 0;
-        int32_t input_uv = 0;
-        uint8_t sample_status = 0U;
-        uint8_t sample_channel = 0U;
-        HAL_StatusTypeDef sample_st;
+        uint8_t round_idx;
+        uint8_t enabled_count = 0U;
+        uint8_t samples_read = 0U;
 
-        /* Service Modbus before each channel read so a request that arrived
-           during the previous sample isn't stalled until the whole 16-channel
-           round finishes. Round latency: ~0..(per-channel timeout) instead of
-           the old worst-case 8s. */
-        if (modbus_enabled != 0U)
+        sample_tick = HAL_GetTick();
+
+        for (round_idx = 0U; round_idx < APP_CONFIG_CHANNEL_COUNT; round_idx++)
         {
-          ModbusRtu_Poll();
+          if (app_config.channels[round_idx].enable != 0U)
+          {
+            enabled_count++;
+          }
         }
 
-        /* Per-channel timeout: AD7124 当前 FILTER 配置为 Sinc4 + FS=64
-           (约 300 SPS)，单通道 settling 约 13ms，100ms 留 ~7× 余量。
-           若后续把 ODR 调慢，需要相应增大此超时。 */
-        sample_st = AD7124_ReadSample(&had7124, &raw_data, &signed_data, &sample_status, 100U);
-        if (sample_st == HAL_OK)
+        while (samples_read < enabled_count && samples_read < 32U)
         {
-          uint8_t ch_gain;
+          uint32_t raw_data = 0U;
+          int32_t signed_data = 0;
+          int32_t input_uv = 0;
+          uint8_t sample_status = 0U;
+          uint8_t sample_channel = 0U;
+          HAL_StatusTypeDef sample_st;
+
+          if (modbus_enabled != 0U)
+          {
+            ModbusRtu_Poll();
+          }
+
+          /* Per-channel timeout: AD7124 FILTER 当前固定 Sinc4 + FS=64
+             (~300 SPS)，单通道 settling ~13ms，100ms 留 ~7× 余量。 */
+          sample_st = AD7124_ReadSample(&had7124, &raw_data, &signed_data, &sample_status, 100U);
+          if (sample_st != HAL_OK)
+          {
+            break;
+          }
 
           sample_channel = AD7124_StatusToChannel(sample_status);
 
-          /* Convert using this channel's actual gain (per-channel config).
-             Fall back to default gain if the reported channel is out of range
-             or the channel has an invalid (zero) gain. */
+          uint8_t ch_gain;
           if (sample_channel < APP_CONFIG_CHANNEL_COUNT &&
               app_config.channels[sample_channel].gain != 0U)
           {
@@ -548,43 +573,83 @@ int main(void)
           input_uv = AD7124_BipolarCodeToMicrovolts(raw_data,
                                                     (int32_t)app_config.adc_vref_mv,
                                                     ch_gain);
-          printf("  CH%02u STATUS=0x%02X RAW=0x%06lX CODE=%ld GAIN=%u VIN=%ld uV\r\n",
-                 (unsigned)sample_channel,
-                 (unsigned)sample_status,
-                 (unsigned long)raw_data,
-                 (long)signed_data,
-                 (unsigned)ch_gain,
-                 (long)input_uv);
+          (void)signed_data; /* still computed by ReadSample, no longer printed */
 
-          /* Update Modbus real-time data */
           if (modbus_enabled != 0U)
           {
             AppModbus_UpdateChannelData(sample_channel, raw_data, input_uv);
           }
+          Recorder_OnChannelSample(sample_channel, input_uv);
 
           samples_read++;
+          HAL_IWDG_Refresh(&hiwdg);
         }
-        else
-        {
-          printf("  CH?? sample error, HAL=%d (read %u/%u samples)\r\n",
-                 (int)sample_st, (unsigned)samples_read, (unsigned)enabled_count);
-          break;
-        }
-        HAL_IWDG_Refresh(&hiwdg);
-      }
 
-      /* Update sample timestamp and system status */
-      if (modbus_enabled != 0U)
-      {
-        AppModbus_UpdateSampleTimestamp();
-        AppModbus_UpdateSystemStatus(ad7124_ready, eeprom_ok, rtc_ok, sd_ok, app_config.run_enable);
+        Recorder_OnScanComplete();
+        sd_ok = Recorder_GetSdOk();
+
+        if (modbus_enabled != 0U)
+        {
+          AppModbus_UpdateSampleTimestamp();
+          AppModbus_UpdateSystemStatus(ad7124_ready, eeprom_ok, rtc_ok, sd_ok, app_config.run_enable);
+        }
       }
     }
+    else if (modbus_enabled != 0U)
+    {
+      /* Paused: still keep RUNNING bit in Modbus status truthful so the UI
+         reflects the stop. */
+      AppModbus_UpdateSystemStatus(ad7124_ready, eeprom_ok, rtc_ok, sd_ok, app_config.run_enable);
+    }
+
+    /* Keep the legacy debug printf loop available behind ad7124_loop_print_enable
+       for bench debugging, but disabled by default to keep USART2 quiet during
+       normal operation. */
+    (void)ad7124_loop_print_enable;
+    (void)ad7124_print_tick;
 
     /* Modbus RTU polling */
     if (modbus_enabled != 0U)
     {
       ModbusRtu_Poll();
+    }
+
+    /* File transfer kick: app_modbus set the pending flag when it answered a
+       FC06 START. The FC06 ACK has been sent by ModbusRtu_Poll above, so we
+       can now safely repurpose USART1 for YMODEM. */
+    if (AppModbus_FileXferStartPending() != 0U)
+    {
+      const FileBrowserEntry *entry = FileBrowser_GetSelected();
+      AppModbus_FileXferClearPending();
+
+      if (entry == NULL)
+      {
+        AppModbus_FileXferSetState(5U, 0x0004U);
+      }
+      else
+      {
+        char file_path[FILE_BROWSER_NAME_SIZE + 8U];
+        YModemResult yr;
+
+        FileBrowser_BuildSelectedPath(file_path, sizeof(file_path));
+
+        /* ModbusRtu_PauseRx was already called inside WriteSingleRegister
+           when the FC06 START arrived, so RXNE has been masked since before
+           the ACK was sent. We only need to resume after YMODEM finishes. */
+        yr = YModem_SendFile(&huart1, file_path, entry->name);
+        ModbusRtu_ResumeRx();
+
+        if (yr == YMODEM_OK)
+        {
+          AppModbus_FileXferSetState(4U, 0U);
+        }
+        else
+        {
+          uint16_t err = (yr == YMODEM_FILE_OPEN_ERROR || yr == YMODEM_FILE_READ_ERROR)
+                             ? 0x0004U : 0x00FFU;
+          AppModbus_FileXferSetState(5U, err);
+        }
+      }
     }
   }
   /* USER CODE END 3 */

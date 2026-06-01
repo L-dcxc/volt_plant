@@ -51,6 +51,12 @@ void ModbusRtu_RxCallback(uint8_t byte);
 /* CRC16 calculation (Modbus standard) */
 uint16_t ModbusRtu_Crc16(const uint8_t *data, uint16_t length);
 
+/* Temporarily yield USART1 to another protocol (e.g. YMODEM). PauseRx masks
+   the RXNE interrupt and drops any half-decoded frame; ResumeRx flushes the
+   overrun flag and re-enables RXNE. */
+void ModbusRtu_PauseRx(void);
+void ModbusRtu_ResumeRx(void);
+
 #ifdef __cplusplus
 }
 #endif
