@@ -30,7 +30,11 @@ extern "C" {
 #define AD7124_DEVICE_ID_VALUE  0x10U
 #define AD7124_STATUS_RDY       0x80U
 #define AD7124_STATUS_CH_MASK   0x0FU
-#define AD7124_ADC_CONTROL_DATA_STATUS 0x0400U
+/* ADC_CONTROL = DATA_STATUS=1 | POWER_MODE=11 (Full Power, fMOD=614.4kHz).
+   Full Power 是必要的：Low Power 下 fMOD=76.8kHz，FS=64 实际 ODR 只有
+   37.5 SPS，sinc4 settling ~107ms，会卡在 main.c 的 100ms 单通道超时上。
+   Full Power 下同 FS=64 → 300 SPS，settling ~13ms，多通道扫描可靠。 */
+#define AD7124_ADC_CONTROL_DATA_STATUS 0x04C0U
 #define AD7124_BIPOLAR_ZERO_CODE 0x800000UL
 #define AD7124_BIPOLAR_FULL_SCALE 8388608L
 #define AD7124_DEFAULT_VREF_MV  2048L

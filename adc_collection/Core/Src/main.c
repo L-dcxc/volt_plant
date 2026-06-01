@@ -522,9 +522,9 @@ int main(void)
           ModbusRtu_Poll();
         }
 
-        /* Per-channel timeout reduced from 500ms to 100ms: AD7124 data ready
-           takes tens of ms in practice; 500ms was overly defensive and caused
-           Modbus to be blocked for seconds when a channel was misconfigured. */
+        /* Per-channel timeout: AD7124 当前 FILTER 配置为 Sinc4 + FS=64
+           (约 300 SPS)，单通道 settling 约 13ms，100ms 留 ~7× 余量。
+           若后续把 ODR 调慢，需要相应增大此超时。 */
         sample_st = AD7124_ReadSample(&had7124, &raw_data, &signed_data, &sample_status, 100U);
         if (sample_st == HAL_OK)
         {

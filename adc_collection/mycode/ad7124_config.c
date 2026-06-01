@@ -81,16 +81,21 @@ HAL_StatusTypeDef AD7124_ApplyConfig(AD7124_HandleTypeDef *dev, const AppConfigI
   {
     uint8_t pga_bits = GainToPgaBits(setups[s].gain);
 
-    /* CONFIG register: Bipolar=1, Burnout=0, REF_BUFP=1, REF_BUFM=1,
-       AIN_BUFP=0, AIN_BUFM=0, REF_SEL=0 (internal), PGA=pga_bits */
-    uint16_t config_val = 0x0800U | pga_bits; /* Bipolar + internal ref + PGA */
+    /* CONFIG: Bipolar=1, REF_SEL=00 (REFIN1 外部基准), PGA=pga_bits,
+       所有 buffer 关闭。
+       与 AD7124_ConfigAllSingleEnded (ad7124.c) 的 0x0800 对齐——这是
+       之前测试 16 通道刷新已验证能稳定工作的组合。
+       不开 AIN_BUFx 是因为：buffer 启用会把输入范围压到
+       [AVSS+100mV, AVDD-100mV]，悬空 / 接近 0V 的输入会被推到轨饱和
+       并出现 settling 不收敛、数据漂移到 0x95xxxx 量级的异常值。 */
+    uint16_t config_val = 0x0800U | pga_bits;
 
     st = AD7124_WriteRegister(dev, (uint8_t)(AD7124_REG_CONFIG_0 + s), config_val, 2U);
     if (st != HAL_OK)
       return st;
 
-    /* FILTER register: Use default sinc4, FS=384 (10 SPS for 614.4kHz clock) */
-    uint32_t filter_val = 0x060180U; /* Sinc4, FS=384 */
+    /* FILTER: Sinc4 + FS=64 → 约 300 SPS，16 通道一轮 settling 约 213ms。 */
+    uint32_t filter_val = 0x060040U;
     st = AD7124_WriteRegister(dev, (uint8_t)(AD7124_REG_FILTER_0 + s), filter_val, 3U);
     if (st != HAL_OK)
       return st;

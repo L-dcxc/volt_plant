@@ -8,7 +8,7 @@ extern "C" {
 #endif
 
 #define APP_CONFIG_MAGIC              0x504C414EUL  /* "PLAN": plant logger configuration image */
-#define APP_CONFIG_VERSION            1U
+#define APP_CONFIG_VERSION            2U
 #define APP_CONFIG_CHANNEL_COUNT      16U
 #define APP_CONFIG_CONTROL_COUNT      4U
 #define APP_CONFIG_RESERVED_SIZE      64U
