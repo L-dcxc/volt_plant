@@ -1,6 +1,7 @@
 #include "app_modbus.h"
 #include "modbus_rtu.h"
 #include "file_browser.h"
+#include "recorder.h"
 #include <string.h>
 
 /* Global state */
@@ -263,6 +264,21 @@ uint8_t AppModbus_ReadInputRegisters(uint16_t start_addr, uint16_t count, uint16
     else if (addr == 0x0051U) out_regs[i] = (uint16_t)(HAL_GetTick() >> 16);
     else if (addr == 0x0052U) out_regs[i] = (uint16_t)(HAL_GetTick() & 0xFFFFU);
     else if (addr == 0x0053U) out_regs[i] = g_last_error_code;
+
+    /* 0x0054–0x0057: SD capacity in MiB (total then free, each 32-bit). */
+    else if (addr >= 0x0054U && addr <= 0x0057U)
+    {
+      uint32_t total_kb = 0U;
+      uint32_t free_kb = 0U;
+      Recorder_GetCapacityKB(&total_kb, &free_kb);
+      uint32_t total_mb = total_kb / 1024U;
+      uint32_t free_mb = free_kb / 1024U;
+      if (addr == 0x0054U)      out_regs[i] = (uint16_t)(total_mb >> 16);
+      else if (addr == 0x0055U) out_regs[i] = (uint16_t)(total_mb & 0xFFFFU);
+      else if (addr == 0x0056U) out_regs[i] = (uint16_t)(free_mb >> 16);
+      else                      out_regs[i] = (uint16_t)(free_mb & 0xFFFFU);
+    }
+    else if (addr >= 0x0058U && addr <= 0x005FU) out_regs[i] = 0U; /* Reserved */
 
     /* 0x0060–0x0074: File Transfer Status */
     else if (addr == 0x0060U) out_regs[i] = g_file_xfer_state;

@@ -211,6 +211,46 @@ FRESULT Storage_WriteTestCsv(void)
   return result;
 }
 
+FRESULT Storage_GetCapacityKB(uint32_t *total_kb, uint32_t *free_kb)
+{
+  FATFS *fs = NULL;
+  DWORD free_clusters = 0U;
+  FRESULT result;
+
+  if (storage_mounted == 0U)
+  {
+    result = Storage_Mount();
+    if (result != FR_OK)
+    {
+      return result;
+    }
+  }
+
+  result = f_getfree((TCHAR const *)SDPath, &free_clusters, &fs);
+  if (result != FR_OK)
+  {
+    return result;
+  }
+  if (fs == NULL)
+  {
+    return FR_INT_ERR;
+  }
+
+  /* Sector size is fixed at 512 B (_MIN_SS == _MAX_SS). 1 KiB = 2 sectors.
+     Compute in 64-bit to avoid overflow on large cards. */
+  if (total_kb != NULL)
+  {
+    DWORD total_clusters = fs->n_fatent - 2U;
+    *total_kb = (uint32_t)(((uint64_t)total_clusters * fs->csize) / 2U);
+  }
+  if (free_kb != NULL)
+  {
+    *free_kb = (uint32_t)(((uint64_t)free_clusters * fs->csize) / 2U);
+  }
+
+  return FR_OK;
+}
+
 const char *Storage_FresultText(FRESULT result)
 {
   switch (result)

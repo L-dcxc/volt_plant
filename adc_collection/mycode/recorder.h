@@ -25,6 +25,10 @@ void Recorder_OnScanComplete(void);
 void Recorder_ResetTiming(void);
 uint8_t Recorder_GetSdOk(void);
 
+/* Last-known SD capacity in KiB, cached by the recorder after each flush.
+   Either pointer may be NULL. Both read 0 until the card is first mounted. */
+void Recorder_GetCapacityKB(uint32_t *total_kb, uint32_t *free_kb);
+
 #ifdef __cplusplus
 }
 #endif

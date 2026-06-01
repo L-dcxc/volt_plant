@@ -14,4 +14,8 @@ FRESULT Storage_AppendLine(const char *file_name, const char *line);
 FRESULT Storage_WriteTestCsv(void);
 const char *Storage_FresultText(FRESULT result);
 
+/* Query filesystem capacity. total_kb/free_kb are filled with the volume size
+   and free space in kibibytes (1024 bytes). Either out pointer may be NULL. */
+FRESULT Storage_GetCapacityKB(uint32_t *total_kb, uint32_t *free_kb);
+
 #endif

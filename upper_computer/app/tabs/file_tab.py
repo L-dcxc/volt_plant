@@ -65,6 +65,9 @@ class FileTab(QWidget):
 
         box = QGroupBox("SD 卡文件")
         v = QVBoxLayout(box)
+        self.lbl_capacity = QLabel("容量：未知")
+        self.lbl_capacity.setStyleSheet("color: #444;")
+        v.addWidget(self.lbl_capacity)
         self.list_widget = QListWidget()
         self.list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.list_widget.itemSelectionChanged.connect(self._on_selection_changed)
@@ -86,7 +89,25 @@ class FileTab(QWidget):
             self.list_widget.clear()
             self._files = []
             self.lbl_detail.setText("未选择文件")
+            self.lbl_capacity.setText("容量：未知")
         self._on_selection_changed()
+
+    def _refresh_capacity(self):
+        try:
+            regs = self.ctx.client.read_input(reg.IR_SD_TOTAL_MB_H, 4)
+        except ModbusError:
+            self.lbl_capacity.setText("容量：读取失败")
+            return
+        total_mb = reg.join_u32(regs[0], regs[1])
+        free_mb = reg.join_u32(regs[2], regs[3])
+        if total_mb == 0:
+            self.lbl_capacity.setText("容量：未知（SD 卡未就绪）")
+            return
+        used_mb = max(total_mb - free_mb, 0)
+        pct = (used_mb * 100) // total_mb if total_mb else 0
+        self.lbl_capacity.setText(
+            "容量：已用 %d MB / 共 %d MB（%d%%），剩余 %d MB"
+            % (used_mb, total_mb, pct, free_mb))
 
     def _selected_rows(self):
         return sorted({self.list_widget.row(it)
@@ -120,6 +141,7 @@ class FileTab(QWidget):
 
         self.list_widget.clear()
         self._files = []
+        self._refresh_capacity()
 
         if self._file_count == 0:
             self.lbl_detail.setText("目录为空或 SD 卡未就绪")

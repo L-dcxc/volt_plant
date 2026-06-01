@@ -16,6 +16,12 @@
 #define RECORDER_NAME_BUF_SIZE   16U
 #define RECORDER_SD_RETRY_MS     5000U
 
+/* Ring-overwrite: when free space drops below this floor, the oldest data
+   file (smallest YYMMDD name) is deleted to make room — like a dashcam. The
+   day's currently-open file is never evicted. */
+#define RECORDER_MIN_FREE_KB     (20U * 1024U)   /* 20 MiB headroom */
+#define RECORDER_EVICT_MAX_LOOPS 64U             /* safety cap per write */
+
 static const AppConfigImage *s_config = NULL;
 
 /* Per-scan buffer: gets the values from the just-completed sample round and
@@ -33,6 +39,11 @@ static uint8_t  s_record_tick_inited = 0U;
 static uint32_t s_last_mount_attempt_tick = 0U;
 static uint8_t  s_sd_mounted = 0U;
 static uint8_t  s_sd_ok = 0U;
+
+/* Cached capacity (KiB), refreshed after each flush so the Modbus layer can
+   report it without triggering a full FAT scan on every register read. */
+static uint32_t s_total_kb = 0U;
+static uint32_t s_free_kb = 0U;
 
 static void Recorder_ClearScan(void)
 {
@@ -155,6 +166,117 @@ static FRESULT Recorder_EnsureMounted(void)
   return result;
 }
 
+/* True if name looks like a recorder data file: "YYMMDD.EXT" — six leading
+   digits then a dot. Other files (SD_TEST.CSV, user files) are left alone. */
+static uint8_t Recorder_IsDataFile(const char *name)
+{
+  if (name == NULL)
+  {
+    return 0U;
+  }
+  for (uint8_t i = 0U; i < 6U; i++)
+  {
+    if ((name[i] < '0') || (name[i] > '9'))
+    {
+      return 0U;
+    }
+  }
+  return (name[6] == '.') ? 1U : 0U;
+}
+
+/* Scan the data directory for the oldest data file (lexicographically
+   smallest YYMMDD name == earliest date), skipping the file currently being
+   written so we never delete today's open log. Returns 1 and fills oldest[]
+   if one is found. */
+static uint8_t Recorder_FindOldestDataFile(const char *current_name,
+                                           char *oldest, uint32_t oldest_size)
+{
+  DIR dir;
+  FILINFO fno;
+  uint8_t found = 0U;
+
+  if (f_opendir(&dir, SDPath) != FR_OK)
+  {
+    return 0U;
+  }
+
+  for (;;)
+  {
+    if (f_readdir(&dir, &fno) != FR_OK)
+    {
+      break;
+    }
+    if (fno.fname[0] == '\0')
+    {
+      break;
+    }
+    if ((fno.fattrib & (AM_DIR | AM_HID | AM_SYS)) != 0U)
+    {
+      continue;
+    }
+    if (Recorder_IsDataFile(fno.fname) == 0U)
+    {
+      continue;
+    }
+    if ((current_name != NULL) && (strcmp(fno.fname, current_name) == 0))
+    {
+      continue; /* never evict the file we're writing right now */
+    }
+
+    if ((found == 0U) || (strcmp(fno.fname, oldest) < 0))
+    {
+      (void)snprintf(oldest, oldest_size, "%s", fno.fname);
+      found = 1U;
+    }
+  }
+
+  (void)f_closedir(&dir);
+  return found;
+}
+
+/* Refresh the cached capacity figures. Best-effort; leaves cache untouched on
+   error so the last good reading is still reported. */
+static void Recorder_RefreshCapacity(void)
+{
+  uint32_t total = 0U;
+  uint32_t freekb = 0U;
+  if (Storage_GetCapacityKB(&total, &freekb) == FR_OK)
+  {
+    s_total_kb = total;
+    s_free_kb = freekb;
+  }
+}
+
+/* Ring-overwrite: while free space is below the floor, delete the oldest data
+   file. Stops when enough space is freed, when only the current day's file
+   remains, or after a safety cap. */
+static void Recorder_EnsureFreeSpace(const char *current_name)
+{
+  for (uint32_t loop = 0U; loop < RECORDER_EVICT_MAX_LOOPS; loop++)
+  {
+    Recorder_RefreshCapacity();
+
+    if ((s_total_kb == 0U) || (s_free_kb >= RECORDER_MIN_FREE_KB))
+    {
+      return; /* capacity unknown, or enough room */
+    }
+
+    char oldest[RECORDER_NAME_BUF_SIZE];
+    char path[RECORDER_PATH_BUF_SIZE];
+
+    if (Recorder_FindOldestDataFile(current_name, oldest, sizeof(oldest)) == 0U)
+    {
+      return; /* nothing left to evict (only today's file remains) */
+    }
+
+    Recorder_BuildPath(path, sizeof(path), oldest);
+    if (f_unlink(path) != FR_OK)
+    {
+      return; /* give up on error; next cycle may retry */
+    }
+  }
+}
+
 /* Compose a CSV line: type,timestamp,CH0_uV,...,CH15_uV.
    row_type 'S' = single-scan sample, 'A' = window average.
    sums[]/counts[] hold the data to emit; for 'S' rows pass the per-scan
@@ -241,6 +363,10 @@ static FRESULT Recorder_FlushLine(const char *line)
     return result;
   }
 
+  /* Ring-overwrite: free room before opening, evicting oldest files but never
+     the one we're about to append to. */
+  Recorder_EnsureFreeSpace(file_name);
+
   Recorder_BuildPath(path, sizeof(path), file_name);
 
   result = f_open(&file, path, FA_WRITE | FA_OPEN_APPEND);
@@ -291,6 +417,11 @@ static FRESULT Recorder_FlushLine(const char *line)
     result = FR_DISK_ERR;
   }
 
+  if (result == FR_OK)
+  {
+    Recorder_RefreshCapacity();
+  }
+
   return result;
 }
 
@@ -308,6 +439,7 @@ void Recorder_Init(const AppConfigImage *config)
   if (Recorder_EnsureMounted() == FR_OK)
   {
     s_sd_ok = 1U;
+    Recorder_RefreshCapacity();
   }
 }
 
@@ -412,4 +544,16 @@ void Recorder_OnScanComplete(void)
 uint8_t Recorder_GetSdOk(void)
 {
   return s_sd_ok;
+}
+
+void Recorder_GetCapacityKB(uint32_t *total_kb, uint32_t *free_kb)
+{
+  if (total_kb != NULL)
+  {
+    *total_kb = s_total_kb;
+  }
+  if (free_kb != NULL)
+  {
+    *free_kb = s_free_kb;
+  }
 }
