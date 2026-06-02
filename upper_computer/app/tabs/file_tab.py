@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """文件下载标签页。
 
-目录列举走 Modbus 寄存器协商。下载文件时：先发 FILE_CMD=START → 等
-固件 FC06 应答完成 → USART1 切到 YMODEM-1K → 上位机用 pyserial 直接
-跑 YMODEM 接收，完成后再回查 IR_FILE_XFER_STATE 确认。
+目录列举走 Modbus 寄存器协商。下载文件时：先 SELECT 目标文件，再发
+FILE_CMD=START → 等固件 FC06 应答完成 → USART1 切到 YMODEM-1K →
+上位机用 pyserial 直接跑 YMODEM 接收，完成后设备回到 Modbus。
 
 支持多选：下载多个文件时选目标文件夹批量保存；删除多个文件时按索引
 从大到小删（固件每次删除后会重新快照目录，降序删可保证剩余索引有效）。
@@ -26,6 +26,7 @@ from .. import ymodem_receiver
 
 DOWNLOAD_RX_TIMEOUT_S = 0.5
 DEVICE_RECOVER_S = 0.2  # let the device flip back to Modbus after a transfer
+LARGE_DOWNLOAD_WARN_BYTES = 1 * 1024 * 1024
 
 
 class FileTab(QWidget):
@@ -218,6 +219,8 @@ class FileTab(QWidget):
         rows = self._selected_rows()
         if not rows:
             return
+        if not self._confirm_large_download(rows):
+            return
 
         c = self.ctx.client
         ser = getattr(c._client, "socket", None)
@@ -278,9 +281,12 @@ class FileTab(QWidget):
                 except Exception:
                     pass
 
-                # START hands USART1 to YMODEM after the FC06 ACK is sent.
+                # Re-select before every START. After a finished transfer the
+                # device leaves FILE_XFER_STATE at COMPLETE, while START only
+                # accepts the SELECTED state.
                 try:
                     c.write_single(reg.HR_FILE_INDEX, row)
+                    c.write_single(reg.HR_FILE_CMD, reg.FILE_CMD_SELECT)
                     c.write_single(reg.HR_FILE_CMD, reg.FILE_CMD_START)
                 except ModbusError as e:
                     fp.close()
@@ -347,3 +353,34 @@ class FileTab(QWidget):
         else:
             QMessageBox.information(
                 self, "下载完成", "全部 %d 个文件下载完成。" % total)
+
+    def _confirm_large_download(self, rows):
+        large = [(self._files[r][0], self._files[r][1]) for r in rows
+                 if self._files[r][1] > LARGE_DOWNLOAD_WARN_BYTES]
+        if not large:
+            return True
+
+        if len(large) == 1:
+            name, size = large[0]
+            text = "文件「%s」大小为 %.2f MB。" % (name, size / 1024.0 / 1024.0)
+        else:
+            total = sum(size for _name, size in large)
+            preview = "\n".join("%s  %.2f MB" % (name, size / 1024.0 / 1024.0)
+                                for name, size in large[:6])
+            if len(large) > 6:
+                preview += "\n..."
+            text = ("选中的文件中有 %d 个超过 1 MB，合计 %.2f MB：\n%s"
+                    % (len(large), total / 1024.0 / 1024.0, preview))
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("文件过大")
+        box.setText(text)
+        box.setInformativeText(
+            "通过上位机串口下载会比较慢，不建议下载大文件。\n"
+            "建议从设备处取回 SD 卡后直接读取数据。"
+        )
+        continue_btn = box.addButton("继续下载", QMessageBox.AcceptRole)
+        box.addButton("取消下载", QMessageBox.RejectRole)
+        box.exec_()
+        return box.clickedButton() == continue_btn
