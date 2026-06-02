@@ -56,12 +56,14 @@ class ControlTab(QWidget):
         self.lbl_eeprom = QLabel("-")
         self.lbl_rtc = QLabel("-")
         self.lbl_sd = QLabel("-")
+        self.lbl_battery = QLabel("-")
         self.lbl_err = QLabel("-")
         sform.addRow("运行状态：", self.lbl_run)
         sform.addRow("AD7124：", self.lbl_ad)
         sform.addRow("EEPROM：", self.lbl_eeprom)
         sform.addRow("RTC：", self.lbl_rtc)
         sform.addRow("SD 卡：", self.lbl_sd)
+        sform.addRow("电池电压：", self.lbl_battery)
         sform.addRow("错误码：", self.lbl_err)
         self.btn_refresh = self._btn("刷新状态", self._on_refresh_status)
         sform.addRow(self.btn_refresh)
@@ -147,16 +149,59 @@ class ControlTab(QWidget):
     # ── 系统状态 ───────────────────────────────────────────
     def _on_refresh_status(self):
         try:
-            regs = self.ctx.client.read_input(reg.IR_SYS_STATUS, 4)
+            # 0x0050–0x0059: status + uptime + error + SD capacity + battery
+            regs = self.ctx.client.read_input(reg.IR_SYS_STATUS, 10)
         except ModbusError as e:
             QMessageBox.critical(self, "读取状态失败", str(e))
             return
         status = regs[0]
         err = regs[3]
+        bat_mv = regs[8]   # 0x0058
+        vdda_mv = regs[9]  # 0x0059
         self.lbl_run.setText("运行中" if status & reg.SYS_BIT_RUNNING else "已停止")
         self.lbl_ad.setText("正常" if status & reg.SYS_BIT_AD7124_READY else "异常")
         self.lbl_eeprom.setText("正常" if status & reg.SYS_BIT_EEPROM_OK else "异常")
         self.lbl_rtc.setText("正常" if status & reg.SYS_BIT_RTC_OK else "异常")
         self.lbl_sd.setText("正常" if status & reg.SYS_BIT_SD_OK else "未就绪")
+        self._set_battery_label(bat_mv, vdda_mv)
         self.lbl_err.setText("0x%04X %s" % (
             err, reg.ERR_CODE_NAMES.get(err, "未知")))
+
+    def _set_battery_label(self, bat_mv, vdda_mv):
+        if bat_mv == 0:
+            self.lbl_battery.setText("未知")
+            self.lbl_battery.setStyleSheet("")
+            return
+        text = "%.2f V" % (bat_mv / 1000.0)
+        pct = self._li_ion_percent(bat_mv)
+        if pct is not None:
+            text += "（约 %d%%）" % pct
+        # 单节锂电：满电 4.2V、标称 3.7V、截止 ~3.0V。
+        # <3.4V 偏低，<3.3V 告警（接近截止，保护板可能断电）。
+        if bat_mv < 3300:
+            color = "#b00"   # 红：接近截止
+            text += "  ⚠ 电量过低，请及时充电"
+        elif bat_mv < 3400:
+            color = "#c80"   # 橙：偏低
+            text += "  ⚠ 电量偏低"
+        else:
+            color = ""
+        self.lbl_battery.setText(text)
+        self.lbl_battery.setStyleSheet("color: %s;" % color if color else "")
+
+    @staticmethod
+    def _li_ion_percent(bat_mv):
+        """单节锂电开路电压 -> 粗略电量百分比（分段线性，仅供参考）。"""
+        if bat_mv <= 0:
+            return None
+        # (电压mV, 电量%) 锚点，源自常见 18650 放电曲线的近似
+        pts = [(3300, 0), (3500, 10), (3700, 35), (3900, 65),
+               (4050, 85), (4200, 100)]
+        if bat_mv <= pts[0][0]:
+            return 0
+        if bat_mv >= pts[-1][0]:
+            return 100
+        for (v0, p0), (v1, p1) in zip(pts, pts[1:]):
+            if v0 <= bat_mv < v1:
+                return int(p0 + (p1 - p0) * (bat_mv - v0) / (v1 - v0))
+        return None

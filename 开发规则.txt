@@ -2,3 +2,4 @@
 所有新增的代码必须写在USER CODE BEGIN----USER CODE END之间
 不用帮我自动保存项目，我自己会保存
 新建.c/.h文件都是放在mycode文件夹里面
+开发日志我自己写

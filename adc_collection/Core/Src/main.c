@@ -42,6 +42,7 @@
 #include "recorder.h"
 #include "file_browser.h"
 #include "ymodem.h"
+#include "battery.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -79,6 +80,8 @@ static uint8_t rtc_ok = 0U;
 static uint8_t sd_ok = 0U;
 static uint32_t sample_tick = 0U;
 static uint8_t prev_run_enable = 0U;
+static uint32_t battery_tick = 0U;
+#define BATTERY_UPDATE_INTERVAL_MS  30000U
 
 /* USER CODE END PV */
 
@@ -460,6 +463,9 @@ int main(void)
 
   /* Bring up the periodic recorder (accumulators + day-rotated SD writer) */
   Recorder_Init(&app_config);
+  Battery_Init();
+  (void)Battery_Update();   /* seed an initial reading for the host */
+  battery_tick = HAL_GetTick();
   sample_tick = HAL_GetTick();
   prev_run_enable = app_config.run_enable;
 
@@ -612,6 +618,14 @@ int main(void)
     if (modbus_enabled != 0U)
     {
       ModbusRtu_Poll();
+    }
+
+    /* Battery voltage: low-rate background read. Uses ADC1, which is
+       otherwise idle, so it does not interfere with AD7124 sampling. */
+    if ((HAL_GetTick() - battery_tick) >= BATTERY_UPDATE_INTERVAL_MS)
+    {
+      (void)Battery_Update();
+      battery_tick = HAL_GetTick();
     }
 
     /* File transfer kick: app_modbus set the pending flag when it answered a

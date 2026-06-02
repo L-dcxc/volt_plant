@@ -32,3 +32,9 @@ AD7124-8 SPI 通信测试通过：ID register read back: 0x17，设备高半字�
 新增多文件操作逻辑支持
 
 新增SD容量读取，新增环形储存机制
+
+6/2
+修复YMODEM下载卡0%问题（START时立即暂停Modbus RX，避免'C'被中断吞掉）
+修复采集/均值节拍漂移（按interval推进而非对齐到当前tick），CSV新增type列区分S采样行/A均值行
+上位机支持多选批量下载/删除
+新增电池电压检测（VREFINT校准VDDA + 分压还原VBAT，Modbus 0x0058上报，上位机状态页显示+低电告警）

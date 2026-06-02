@@ -1444,6 +1444,11 @@
               <FileType>1</FileType>
               <FilePath>..\mycode\ymodem.c</FilePath>
             </File>
+            <File>
+              <FileName>battery.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\mycode\battery.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
