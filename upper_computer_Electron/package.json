@@ -1,0 +1,27 @@
+{
+  "name": "upper_computer_electron",
+  "version": "1.0.0",
+  "description": "STM32 植物记录仪 Electron 上位机",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check src/main/main.js && node --check src/main/modbus.js && node --check src/main/ymodem.js && node --check src/main/preload.js && node --check src/renderer/renderer.js"
+  },
+  "keywords": [
+    "electron",
+    "modbus",
+    "stm32",
+    "plant-recorder"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "electron": "^42.3.2"
+  },
+  "dependencies": {
+    "gsap": "^3.15.0",
+    "lucide-static": "^1.17.0",
+    "serialport": "^13.0.0"
+  }
+}

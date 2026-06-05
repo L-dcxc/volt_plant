@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>植物记录仪上位机</title>
+    <link rel="stylesheet" href="../../node_modules/lucide-static/font/lucide.css">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="rail">
+        <div class="brand">
+          <div class="brand-mark">V</div>
+          <div>
+            <div class="brand-title">VoltLog</div>
+            <div class="brand-sub">Plant Recorder</div>
+          </div>
+        </div>
+        <nav class="nav">
+          <button class="nav-item active" data-view="dashboard"><i class="icon-gauge"></i><span>总览</span></button>
+          <button class="nav-item" data-view="clock"><i class="icon-clock-3"></i><span>时钟</span></button>
+          <button class="nav-item" data-view="channels"><i class="icon-activity"></i><span>通道</span></button>
+          <button class="nav-item" data-view="config"><i class="icon-sliders-horizontal"></i><span>配置</span></button>
+          <button class="nav-item" data-view="files"><i class="icon-folder-down"></i><span>文件</span></button>
+        </nav>
+        <div class="rail-footer">
+          <div class="tiny-label">状态</div>
+          <div id="railStatus" class="rail-status offline">未连接</div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <div class="eyebrow">STM32 多通道电压记录仪</div>
+            <h1 id="viewTitle">总览</h1>
+          </div>
+          <div class="connection-panel">
+            <select id="portSelect"></select>
+            <button id="refreshPorts" class="icon-btn" title="刷新串口"><i class="icon-refresh-cw"></i></button>
+            <select id="baudSelect">
+              <option>9600</option><option>19200</option><option>38400</option><option>57600</option><option selected>115200</option>
+            </select>
+            <input id="slaveInput" type="number" min="1" max="247" value="1" title="从机地址">
+            <button id="connectBtn" class="primary"><i class="icon-plug"></i><span>连接</span></button>
+          </div>
+        </header>
+
+        <section id="dashboard" class="view active">
+          <div class="status-grid">
+            <article class="metric-card">
+              <div class="metric-head"><span>运行状态</span><i class="icon-power"></i></div>
+              <div id="metricRun" class="metric-value">--</div>
+              <div class="metric-actions">
+                <button id="startBtn" class="success"><i class="icon-play"></i><span>启动</span></button>
+                <button id="pauseBtn"><i class="icon-pause"></i><span>暂停</span></button>
+              </div>
+            </article>
+            <article class="metric-card">
+              <div class="metric-head"><span>电池</span><i class="icon-battery"></i></div>
+              <div id="metricBattery" class="metric-value">--</div>
+              <div id="batteryHint" class="metric-note">等待刷新</div>
+            </article>
+            <article class="metric-card">
+              <div class="metric-head"><span>SD 卡</span><i class="icon-sd-card"></i></div>
+              <div id="metricSd" class="metric-value">--</div>
+              <div class="capacity-bar"><span id="capacityFill"></span></div>
+            </article>
+            <article class="metric-card">
+              <div class="metric-head"><span>设备</span><i class="icon-cpu"></i></div>
+              <div id="metricDevice" class="metric-value">--</div>
+              <div class="device-meta">
+                <div><span>固件</span><span id="metricFw">--</span></div>
+                <div><span>配置</span><span id="metricCfg">--</span></div>
+                <div><span>错误码</span><span id="metricError">--</span></div>
+              </div>
+            </article>
+          </div>
+
+          <div class="band two-col">
+            <section>
+              <h2>程序控制</h2>
+              <div class="button-strip">
+                <button id="uploadConfig"><i class="icon-upload"></i><span>上传程序</span></button>
+                <button id="retrieveConfig"><i class="icon-download"></i><span>取回程序</span></button>
+                <button id="saveConfig"><i class="icon-save"></i><span>保存 EEPROM</span></button>
+                <button id="restoreDefaults" class="danger"><i class="icon-rotate-ccw"></i><span>恢复出厂</span></button>
+                <button id="softReset" class="danger"><i class="icon-refresh-ccw"></i><span>软件复位</span></button>
+              </div>
+            </section>
+            <section>
+              <h2>系统位</h2>
+              <div id="systemBits" class="chip-row"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="clock" class="view">
+          <div class="band two-col">
+            <section>
+              <h2>设备时钟</h2>
+              <div id="deviceClock" class="clock-face">--</div>
+              <div class="button-strip">
+                <button id="readClock"><i class="icon-clock"></i><span>读取时间</span></button>
+                <button id="setSystemClock" class="primary"><i class="icon-monitor-check"></i><span>设为系统时间</span></button>
+              </div>
+            </section>
+            <section>
+              <h2>手动设定</h2>
+              <input id="manualDateTime" type="datetime-local">
+              <button id="setManualClock"><i class="icon-send"></i><span>写入设定时间</span></button>
+            </section>
+          </div>
+        </section>
+
+        <section id="channels" class="view">
+          <div class="band">
+            <div class="section-head">
+              <h2>通道读取</h2>
+              <div class="button-strip compact">
+                <button id="selectAllChannels">全选</button>
+                <button id="selectNoChannels">全不选</button>
+                <button id="readChannels" class="primary"><i class="icon-zap"></i><span>读取所选通道</span></button>
+              </div>
+            </div>
+            <div id="channelChecks" class="channel-checks"></div>
+            <div id="channelResults" class="data-table"></div>
+          </div>
+        </section>
+
+        <section id="config" class="view">
+          <div class="config-layout">
+            <section class="band">
+              <h2>系统配置</h2>
+              <div class="form-grid">
+                <label>Modbus 地址<input id="cfgAddr" type="number" min="1" max="247" value="1"></label>
+                <label>波特率<select id="cfgBaud"><option>9600</option><option>19200</option><option>38400</option><option>57600</option><option selected>115200</option></select></label>
+                <label>采样间隔(s)<input id="cfgSample" type="number" min="1" value="60"></label>
+                <label>记录间隔(s)<input id="cfgRecord" type="number" min="1" value="600"></label>
+                <label>文件格式<select id="cfgFormat"><option value="0">CSV</option><option value="1">DAT</option><option value="2">TXT</option></select></label>
+                <label>ADC 参考(mV)<input id="cfgVref" type="number" min="1" value="2048"></label>
+                <label>默认增益<select id="cfgGain"></select></label>
+                <label class="toggle-field">
+                  <span class="toggle-text">
+                    <span class="toggle-title">启用平均</span>
+                    <span class="toggle-hint">多次采样取平均</span>
+                  </span>
+                  <span class="toggle-switch">
+                    <input id="cfgAvg" type="checkbox" checked>
+                    <span class="toggle-slider"></span>
+                  </span>
+                </label>
+              </div>
+              <div class="button-strip">
+                <button id="readConfig"><i class="icon-clipboard-down"></i><span>从设备读取</span></button>
+                <button id="writeConfig"><i class="icon-send"></i><span>写入设备</span></button>
+                <button id="writeSaveConfig" class="primary"><i class="icon-save"></i><span>写入并保存</span></button>
+              </div>
+            </section>
+            <section class="band channels-config">
+              <div class="section-head"><h2>16 通道配置</h2><span>固定 AINn，相邻差分自动互斥</span></div>
+              <div id="configChannels" class="config-table"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="files" class="view">
+          <div class="band">
+            <div class="section-head">
+              <h2>SD 卡文件</h2>
+              <div class="button-strip compact">
+                <button id="openDir" class="primary"><i class="icon-folder-sync"></i><span>刷新目录</span></button>
+                <button id="downloadFiles"><i class="icon-download"></i><span>下载选中</span></button>
+                <button id="deleteFiles" class="danger"><i class="icon-trash-2"></i><span>删除选中</span></button>
+              </div>
+            </div>
+            <div id="fileSummary" class="file-summary">尚未读取目录</div>
+            <div id="fileList" class="file-list"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast"></div>
+    <div id="downloadOverlay" class="overlay hidden">
+      <div class="download-panel">
+        <div class="section-head"><h2 id="downloadTitle">正在下载</h2><button id="cancelDownload" class="icon-btn"><i class="icon-x"></i></button></div>
+        <div class="progress-rail"><span id="downloadFill"></span></div>
+        <div id="downloadText" class="metric-note">准备中</div>
+      </div>
+    </div>
+
+    <script src="../../node_modules/gsap/dist/gsap.min.js"></script>
+    <script src="renderer.js"></script>
+  </body>
+</html>

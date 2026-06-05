@@ -40,3 +40,11 @@ Thumbs.db
 # Editor folders
 .vscode/
 .idea/
+
+# Node / Electron dependencies and build outputs
+node_modules/
+upper_computer_Electron/node_modules/
+upper_computer_Electron/dist/
+upper_computer_Electron/out/
+upper_computer_Electron/build/
+upper_computer_Electron/.vite/
