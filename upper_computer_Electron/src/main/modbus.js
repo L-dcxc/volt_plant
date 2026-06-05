@@ -67,6 +67,8 @@ class ModbusRtuClient {
     this.timeoutMs = Number(timeoutMs);
     this.retries = Math.max(0, Number(retries));
     this.rx = Buffer.alloc(0);
+    this.pending = null;
+    this.queue = Promise.resolve();
     this.port = new SerialPort({
       path,
       baudRate: Number(baudRate),
@@ -89,6 +91,12 @@ class ModbusRtuClient {
   }
 
   async disconnect() {
+    if (this.pending) {
+      clearTimeout(this.pending.timeout);
+      this.pending.reject(new ModbusError("连接已断开"));
+      this.pending = null;
+    }
+    this.queue = Promise.resolve();
     if (!this.port) return;
     const p = this.port;
     this.port = null;
@@ -179,8 +187,11 @@ class ModbusRtuClient {
   }
 
   _request(frame, functionCode, parser) {
-    this.queue = this.queue.then(() => this._sendWithRetry(frame, functionCode, parser));
-    return this.queue;
+    const job = this.queue
+      .catch(() => {})
+      .then(() => this._sendWithRetry(frame, functionCode, parser));
+    this.queue = job.catch(() => {});
+    return job;
   }
 
   async _sendWithRetry(frame, functionCode, parser) {

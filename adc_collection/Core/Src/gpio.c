@@ -52,28 +52,28 @@ void MX_GPIO_Init(void)
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(BAT_ADC_EN_GPIO_Port, BAT_ADC_EN_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOC, BAT_ADC_EN_Pin|CTRL_OUT1_Pin|CTRL_OUT2_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(ADC_PWR_EN_GPIO_Port, ADC_PWR_EN_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, ADC_PWR_EN_Pin|CTRL_OUT3_Pin|CTRL_OUT4_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, LED_GREEN_Pin|LED_YELLOW_Pin|LED_RED_Pin|PWR_ON_Pin
                           |SD_PWR_EN_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : BAT_ADC_EN_Pin */
-  GPIO_InitStruct.Pin = BAT_ADC_EN_Pin;
+  /*Configure GPIO pins : BAT_ADC_EN_Pin CTRL_OUT1_Pin CTRL_OUT2_Pin */
+  GPIO_InitStruct.Pin = BAT_ADC_EN_Pin|CTRL_OUT1_Pin|CTRL_OUT2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(BAT_ADC_EN_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : ADC_PWR_EN_Pin */
-  GPIO_InitStruct.Pin = ADC_PWR_EN_Pin;
+  /*Configure GPIO pins : ADC_PWR_EN_Pin CTRL_OUT3_Pin CTRL_OUT4_Pin */
+  GPIO_InitStruct.Pin = ADC_PWR_EN_Pin|CTRL_OUT3_Pin|CTRL_OUT4_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(ADC_PWR_EN_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pins : LED_GREEN_Pin LED_YELLOW_Pin LED_RED_Pin PWR_ON_Pin
                            SD_PWR_EN_Pin */

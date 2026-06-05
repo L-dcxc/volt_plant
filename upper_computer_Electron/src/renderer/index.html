@@ -132,14 +132,16 @@
         <section id="config" class="view">
           <div class="config-layout">
             <section class="band">
-              <h2>系统配置</h2>
+              <div class="section-head config-section-head">
+                <h2>系统配置</h2>
+                <button id="configHelp" class="icon-btn help-btn" type="button" title="配置说明" aria-label="配置说明"><i class="icon-circle-help"></i></button>
+              </div>
               <div class="form-grid">
                 <label>Modbus 地址<input id="cfgAddr" type="number" min="1" max="247" value="1"></label>
                 <label>波特率<select id="cfgBaud"><option>9600</option><option>19200</option><option>38400</option><option>57600</option><option selected>115200</option></select></label>
-                <label>采样间隔(s)<input id="cfgSample" type="number" min="1" value="60"></label>
-                <label>记录间隔(s)<input id="cfgRecord" type="number" min="1" value="600"></label>
+                <label>采样间隔(s)<input id="cfgSample" type="number" min="1" max="86400" value="60"></label>
+                <label>平均记录间隔(s)<input id="cfgRecord" type="number" min="1" max="86400" value="600"></label>
                 <label>文件格式<select id="cfgFormat"><option value="0">CSV</option><option value="1">DAT</option><option value="2">TXT</option></select></label>
-                <label>ADC 参考(mV)<input id="cfgVref" type="number" min="1" value="2048"></label>
                 <label>默认增益<select id="cfgGain"></select></label>
                 <label class="toggle-field">
                   <span class="toggle-text">
@@ -157,6 +159,15 @@
                 <button id="writeConfig"><i class="icon-send"></i><span>写入设备</span></button>
                 <button id="writeSaveConfig" class="primary"><i class="icon-save"></i><span>写入并保存</span></button>
               </div>
+            </section>
+            <section class="band controls-config">
+              <div class="section-head">
+                <h2>IO 控制输出</h2>
+                <div class="button-strip compact">
+                  <button id="refreshControls"><i class="icon-refresh-cw"></i><span>刷新状态</span></button>
+                </div>
+              </div>
+              <div id="controlCards" class="control-grid"></div>
             </section>
             <section class="band channels-config">
               <div class="section-head"><h2>16 通道配置</h2><span>固定 AINn，相邻差分自动互斥</span></div>
@@ -183,6 +194,48 @@
     </div>
 
     <div id="toast" class="toast"></div>
+    <div id="configHelpOverlay" class="overlay hidden">
+      <div class="help-panel">
+        <div class="section-head">
+          <h2>配置说明</h2>
+          <button id="closeConfigHelp" class="icon-btn" title="关闭"><i class="icon-x"></i></button>
+        </div>
+        <div class="help-body">
+          <section>
+            <h3>系统配置</h3>
+            <p><b>Modbus 地址</b>用于区分设备，和连接栏里的从机地址要一致。</p>
+            <p><b>波特率</b>需要和设备串口参数一致，改动后通常要重新连接。</p>
+            <p><b>采样间隔</b>决定设备多久完成一轮新的通道采样；通道页刷新只读取最近一次采样值，不会立即触发采样。范围 1-86400 秒。</p>
+            <p><b>平均记录间隔</b>是平均/汇总值写入记录文件的周期，范围 1-86400 秒，不能小于采样间隔。</p>
+            <p><b>文件格式</b>决定 SD 卡保存数据的格式，CSV 便于表格软件查看。</p>
+            <p><b>启用平均</b>后，平均记录间隔内的多轮采样会参与平均，落盘值更平稳；关闭后更接近瞬时采样结果。</p>
+          </section>
+          <section>
+            <h3>通道配置</h3>
+            <p><b>单端</b>模式读取 AINn 相对 AVSS 的电压。</p>
+            <p><b>差分</b>模式读取相邻 AIN 的电压差，配对关系为 0↔1、2↔3、4↔5，以此类推到 14↔15；其中一路设为差分后，配对通道会被占用并禁用。</p>
+            <p><b>增益</b>是 AD7124 的硬件 PGA 放大倍数，用于测微弱信号；增益越高，满量程越小，输入过大时会饱和。</p>
+            <p><b>量程</b>是给上位机显示/判断用的标称范围，单位 uV，不改变 ADC 硬件量程。</p>
+            <p><b>偏移</b>是零点校准值，单位 uV；如果空载时读数偏高 12uV，可填 12 让软件扣除。</p>
+            <p><b>修正 ppm</b>是软件比例系数，1000000 表示 1.000000 倍；最终近似为 <code>(原始uV - 偏移) × 修正ppm / 1000000</code>。</p>
+            <p><b>预热</b>是采样前等待传感器稳定的时间，单位 ms，0 表示不等待。</p>
+          </section>
+          <section>
+            <h3>控制输出</h3>
+            <p><b>周期</b>和<b>开启</b>决定自动输出的通断节拍，范围 1-86400 秒；例如周期 600s、开启 30s 表示每 10 分钟打开 30 秒。</p>
+            <p><b>周期不能为 0</b>。启用自动输出时，0 会被判为非法；常开请用手动 ON，或设置开启时长等于周期。</p>
+            <p><b>相位</b>是相对系统启动时间的延迟/错峰量，单位秒。例如四路周期都为 600s，分别设相位 0/30/60/90，可避免同时动作。</p>
+            <p><b>物理输出</b>决定该控制逻辑实际驱动 OUT1-OUT4 哪一路。</p>
+            <p><b>Auto/ON/OFF</b>是临时强制状态，适合现场测试；强制状态不作为长期策略保存。</p>
+          </section>
+          <section>
+            <h3>写入方式</h3>
+            <p><b>写入设备</b>立即生效，但断电后不保留。</p>
+            <p><b>写入并保存</b>会写入 EEPROM，设备重启后继续使用。</p>
+          </section>
+        </div>
+      </div>
+    </div>
     <div id="downloadOverlay" class="overlay hidden">
       <div class="download-panel">
         <div class="section-head"><h2 id="downloadTitle">正在下载</h2><button id="cancelDownload" class="icon-btn"><i class="icon-x"></i></button></div>

@@ -239,6 +239,11 @@ uint8_t AppConfig_IsValid(const AppConfigImage *config)
   {
     const AppControlOutputConfig *control = &config->controls[i];
 
+    if (control->output_id >= APP_CONFIG_CONTROL_COUNT)
+    {
+      return 0U;
+    }
+
     if (control->enable == 0U)
     {
       continue;

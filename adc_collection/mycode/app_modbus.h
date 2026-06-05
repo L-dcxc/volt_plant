@@ -32,6 +32,7 @@ void AppModbus_SetReconfigureCallback(AppModbusReconfigureCb callback);
 
 /* Update real-time channel data (called after AD7124 sampling) */
 void AppModbus_UpdateChannelData(uint8_t channel, uint32_t raw, int32_t uv);
+void AppModbus_ClearChannelData(void);
 
 /* Update system status flags */
 void AppModbus_UpdateSystemStatus(uint8_t ad7124_ready, uint8_t eeprom_ok,

@@ -3,6 +3,9 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 const GAIN_VALUES = [1, 2, 4, 8, 16, 32, 64, 128];
 const LARGE_FILE_BYTES = 1024 * 1024;
+const CONTROL_FORCE_LABELS = ["AUTO", "ON", "OFF"];
+const CONFIG_TIME_MAX_SEC = 86400;
+const CONFIG_I32_LIMIT = 2000000000;
 
 const state = {
   connected: false,
@@ -238,18 +241,50 @@ async function readChannels() {
   const rows = await safe("读取通道", () => window.plantApi.readChannels(channels));
   $("#channelResults").innerHTML = [
     `<div class="table-row" style="color:var(--muted);font-size:11px"><span>通道</span><span>电压 uV</span><span>电压 V</span><span>原始码</span><span>有效</span></div>`,
-    ...rows.map((r) => `<div class="table-row"><span>CH${r.ch}</span><span>${r.voltageUv}</span><span>${(r.voltageUv / 1e6).toFixed(6)}</span><span>${hex(r.raw, 6)}</span><span>${r.valid ? "是" : "否"}</span></div>`),
+    ...rows.map((r) => {
+      if (!r.valid) {
+        return `<div class="table-row disabled"><span>CH${r.ch}</span><span>未刷新</span><span>--</span><span>--</span><span>无效</span></div>`;
+      }
+      return `<div class="table-row"><span>CH${r.ch}</span><span>${r.voltageUv}</span><span>${(r.voltageUv / 1e6).toFixed(6)}</span><span>${hex(r.raw, 6)}</span><span>有效</span></div>`;
+    }),
   ].join("");
   gsap.from("#channelResults .table-row", { y: 10, autoAlpha: 0, stagger: 0.035 });
 }
 
 function buildConfigShell() {
   $("#cfgGain").innerHTML = GAIN_VALUES.map((g) => `<option value="${g}">${g}</option>`).join("");
+  $("#controlCards").innerHTML = Array.from({ length: 4 }, (_, index) => controlCard(index)).join("");
   const header = `<div class="config-row header"><span>通道</span><span>使能</span><span>模式</span><span>增益</span><span>量程uV</span><span>偏移uV</span><span>修正ppm</span><span>预热ms</span><span>输入</span></div>`;
   const rows = Array.from({ length: 16 }, (_, ch) => configRow(ch)).join("");
   $("#configChannels").innerHTML = header + rows;
   $$(".cfg-mode").forEach((el) => el.addEventListener("change", refreshPairStates));
+  $$(".force-btn").forEach((btn) => btn.addEventListener("click", () => forceControl(btn)));
   refreshPairStates();
+}
+
+function controlCard(index) {
+  return `<article class="control-card" data-control="${index}">
+    <div class="control-top">
+      <div class="control-name"><span class="control-led"></span><span>控制 ${index + 1}</span></div>
+      <span class="control-status">未刷新</span>
+    </div>
+    <label class="control-enable"><input class="ctrl-enable" type="checkbox">启用自动输出</label>
+    <div class="control-fields">
+      <label>物理输出
+        <select class="ctrl-output">
+          <option value="0">OUT1</option><option value="1">OUT2</option><option value="2">OUT3</option><option value="3">OUT4</option>
+        </select>
+      </label>
+      <label>相位(s)<input class="ctrl-phase" type="number" min="0" max="${CONFIG_TIME_MAX_SEC}" value="${index * 5}"></label>
+      <label>周期(s)<input class="ctrl-interval" type="number" min="1" max="${CONFIG_TIME_MAX_SEC}" value="600"></label>
+      <label>开启(s)<input class="ctrl-duration" type="number" min="1" max="${CONFIG_TIME_MAX_SEC}" value="30"></label>
+    </div>
+    <div class="control-actions">
+      <button class="force-btn active" data-force="0">Auto</button>
+      <button class="force-btn force-on" data-force="1">ON</button>
+      <button class="force-btn force-off" data-force="2">OFF</button>
+    </div>
+  </article>`;
 }
 
 function configRow(ch) {
@@ -258,24 +293,34 @@ function configRow(ch) {
     <label><input class="cfg-ch-enable" type="checkbox" checked></label>
     <select class="cfg-mode"><option value="0">单端</option><option value="1">差分</option></select>
     <select class="cfg-ch-gain">${GAIN_VALUES.map((g) => `<option value="${g}">${g}</option>`).join("")}</select>
-    <input class="cfg-range" type="number" value="2000000">
-    <input class="cfg-offset" type="number" value="0">
-    <input class="cfg-scale" type="number" value="1000000">
-    <input class="cfg-warmup" type="number" value="0">
+    <input class="cfg-range" type="number" min="0" max="${CONFIG_I32_LIMIT}" value="2000000">
+    <input class="cfg-offset" type="number" min="-${CONFIG_I32_LIMIT}" max="${CONFIG_I32_LIMIT}" value="0">
+    <input class="cfg-scale" type="number" min="-${CONFIG_I32_LIMIT}" max="${CONFIG_I32_LIMIT}" value="1000000">
+    <input class="cfg-warmup" type="number" min="0" max="${CONFIG_I32_LIMIT}" value="0">
     <span class="cfg-input-label">AIN${ch}/AVSS</span>
   </div>`;
 }
 
 function refreshPairStates() {
-  $$(".config-row[data-ch]").forEach((row) => row.classList.remove("disabled"));
+  $$(".config-row[data-ch]").forEach((row) => {
+    row.classList.remove("disabled");
+    row.querySelectorAll("input, select").forEach((el) => { el.disabled = false; });
+  });
   for (let ch = 0; ch < 16; ch++) {
     const row = $(`.config-row[data-ch="${ch}"]`);
+    if (row.classList.contains("disabled")) continue;
     const mode = row.querySelector(".cfg-mode").value;
     const label = row.querySelector(".cfg-input-label");
     if (mode === "1") {
       const pair = ch % 2 === 0 ? ch + 1 : ch - 1;
+      const pairRow = $(`.config-row[data-ch="${pair}"]`);
       label.textContent = `AIN${ch}/AIN${pair}`;
-      $(`.config-row[data-ch="${pair}"]`)?.classList.add("disabled");
+      if (pairRow) {
+        pairRow.classList.add("disabled");
+        pairRow.querySelector(".cfg-ch-enable").checked = false;
+        pairRow.querySelector(".cfg-mode").value = "0";
+        pairRow.querySelectorAll("input, select").forEach((el) => { el.disabled = true; });
+      }
     } else {
       label.textContent = `AIN${ch}/AVSS`;
     }
@@ -296,7 +341,6 @@ function fillConfig(cfg) {
   $("#cfgSample").value = cfg.sampleIntervalSec;
   $("#cfgRecord").value = cfg.recordIntervalSec;
   $("#cfgFormat").value = String(cfg.fileFormat);
-  $("#cfgVref").value = cfg.adcVrefMv;
   $("#cfgGain").value = String(cfg.adcDefaultGain);
   $("#cfgAvg").checked = cfg.avgEnable;
   for (const ch of cfg.channels) {
@@ -309,8 +353,39 @@ function fillConfig(cfg) {
     row.querySelector(".cfg-scale").value = ch.scalePpm;
     row.querySelector(".cfg-warmup").value = ch.warmupMs;
   }
+  fillControls(cfg.controls || []);
   refreshPairStates();
+  gsap.from(".control-card", { y: 12, autoAlpha: 0, stagger: 0.05 });
   gsap.from(".config-row[data-ch]", { x: -10, autoAlpha: 0, stagger: 0.018 });
+}
+
+function fillControls(controls) {
+  for (const control of controls) {
+    const row = $(`.control-card[data-control="${control.index}"]`);
+    if (!row) continue;
+    row.querySelector(".ctrl-enable").checked = Boolean(control.enable);
+    row.querySelector(".ctrl-output").value = String(control.outputId ?? control.index);
+    row.querySelector(".ctrl-interval").value = control.intervalSec ?? 600;
+    row.querySelector(".ctrl-duration").value = control.onDurationSec ?? 30;
+    row.querySelector(".ctrl-phase").value = control.phaseOffsetSec ?? 0;
+    applyControlStatus(control);
+  }
+}
+
+function applyControlStatus(control) {
+  const row = $(`.control-card[data-control="${control.index}"]`);
+  if (!row) return;
+  row.classList.toggle("on", Boolean(control.output));
+  row.dataset.enabled = control.enabled ? "1" : "0";
+  const status = row.querySelector(".control-status");
+  status.textContent = `${control.output ? "输出ON" : "输出OFF"} · ${control.enabled ? "已启用" : "未启用"} · ${CONTROL_FORCE_LABELS[control.force] || "AUTO"} · ${control.remainSec || 0}s`;
+  status.classList.toggle("forced", Boolean(control.forced));
+  row.querySelectorAll(".force-btn").forEach((btn) => {
+    const force = Number(btn.dataset.force);
+    btn.classList.toggle("active", force === Number(control.force || 0));
+    btn.disabled = force !== 0 && !control.enabled;
+  });
+  gsap.fromTo(row.querySelector(".control-led"), { scale: 0.75 }, { scale: 1, duration: 0.28, ease: "back.out(1.7)", overwrite: "auto" });
 }
 
 function collectConfig(save = false) {
@@ -321,7 +396,6 @@ function collectConfig(save = false) {
     fileFormat: Number($("#cfgFormat").value),
     sampleIntervalSec: Number($("#cfgSample").value),
     recordIntervalSec: Number($("#cfgRecord").value),
-    adcVrefMv: Number($("#cfgVref").value),
     adcDefaultGain: Number($("#cfgGain").value),
     save,
     channels: $$(".config-row[data-ch]").map((row) => ({
@@ -334,13 +408,106 @@ function collectConfig(save = false) {
       scalePpm: Number(row.querySelector(".cfg-scale").value),
       warmupMs: Number(row.querySelector(".cfg-warmup").value),
     })),
+    controls: $$(".control-card").map((row) => ({
+      index: Number(row.dataset.control),
+      enable: row.querySelector(".ctrl-enable").checked,
+      outputId: Number(row.querySelector(".ctrl-output").value),
+      intervalSec: Number(row.querySelector(".ctrl-interval").value),
+      onDurationSec: Number(row.querySelector(".ctrl-duration").value),
+      phaseOffsetSec: Number(row.querySelector(".ctrl-phase").value),
+    })),
   };
+}
+
+function showConfigHelp() {
+  const overlay = $("#configHelpOverlay");
+  const panel = overlay.querySelector(".help-panel");
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  overlay.classList.remove("hidden");
+  gsap.fromTo(overlay, { autoAlpha: 0 }, { autoAlpha: 1, duration: reduceMotion ? 0 : 0.18, overwrite: "auto" });
+  gsap.fromTo(panel,
+    { y: 18, scale: 0.98, autoAlpha: 0 },
+    { y: 0, scale: 1, autoAlpha: 1, duration: reduceMotion ? 0 : 0.26, ease: "power3.out", overwrite: "auto" },
+  );
+}
+
+function hideConfigHelp() {
+  const overlay = $("#configHelpOverlay");
+  const panel = overlay.querySelector(".help-panel");
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  gsap.to(panel, { y: 12, scale: 0.98, autoAlpha: 0, duration: reduceMotion ? 0 : 0.16, overwrite: "auto" });
+  gsap.to(overlay, {
+    autoAlpha: 0,
+    duration: reduceMotion ? 0 : 0.18,
+    overwrite: "auto",
+    onComplete: () => {
+      overlay.classList.add("hidden");
+      gsap.set([overlay, panel], { clearProps: "all" });
+    },
+  });
+}
+
+function validateConfigPayload(config) {
+  if (config.sampleIntervalSec < 1 || config.sampleIntervalSec > CONFIG_TIME_MAX_SEC) {
+    return `采样间隔范围为 1-${CONFIG_TIME_MAX_SEC} 秒`;
+  }
+  if (config.recordIntervalSec < 1 || config.recordIntervalSec > CONFIG_TIME_MAX_SEC) {
+    return `平均记录间隔范围为 1-${CONFIG_TIME_MAX_SEC} 秒`;
+  }
+  if (config.recordIntervalSec < config.sampleIntervalSec) {
+    return "平均记录间隔不能小于采样间隔";
+  }
+
+  for (const ch of config.channels) {
+    if (ch.rangeUv < 0 || ch.rangeUv > CONFIG_I32_LIMIT) return `CH${ch.ch} 量程超出范围`;
+    if (ch.offsetUv < -CONFIG_I32_LIMIT || ch.offsetUv > CONFIG_I32_LIMIT) return `CH${ch.ch} 偏移超出范围`;
+    if (ch.scalePpm < -CONFIG_I32_LIMIT || ch.scalePpm > CONFIG_I32_LIMIT) return `CH${ch.ch} 修正 ppm 超出范围`;
+    if (ch.enable && ch.scalePpm === 0) return `CH${ch.ch} 修正 ppm 不能为 0`;
+    if (ch.warmupMs < 0 || ch.warmupMs > CONFIG_I32_LIMIT) return `CH${ch.ch} 预热时间超出范围`;
+  }
+
+  for (const control of config.controls) {
+    const name = `控制 ${control.index + 1}`;
+    if (control.outputId < 0 || control.outputId > 3) return `${name} 物理输出无效`;
+    if (control.phaseOffsetSec < 0 || control.phaseOffsetSec > CONFIG_TIME_MAX_SEC) return `${name} 相位范围为 0-${CONFIG_TIME_MAX_SEC} 秒`;
+    if (control.intervalSec < 1 || control.intervalSec > CONFIG_TIME_MAX_SEC) return `${name} 周期范围为 1-${CONFIG_TIME_MAX_SEC} 秒`;
+    if (control.onDurationSec < 1 || control.onDurationSec > CONFIG_TIME_MAX_SEC) return `${name} 开启时间范围为 1-${CONFIG_TIME_MAX_SEC} 秒`;
+    if (control.onDurationSec > control.intervalSec) return `${name} 开启时间不能大于周期`;
+  }
+
+  return "";
 }
 
 async function writeConfig(save = false) {
   if (!guardConnected()) return;
-  await safe("写入配置", () => window.plantApi.writeConfig(collectConfig(save)));
+  const config = collectConfig(save);
+  const error = validateConfigPayload(config);
+  if (error) {
+    toast(error, "error");
+    return;
+  }
+  await safe("写入配置", () => window.plantApi.writeConfig(config));
   toast(save ? "配置已写入并保存" : "配置已写入设备");
+}
+
+async function refreshControls(showToast = true) {
+  if (!guardConnected()) return;
+  const controls = await safe("刷新IO状态", () => window.plantApi.readControlStatuses());
+  controls.forEach(applyControlStatus);
+  if (showToast) toast("IO 状态已刷新");
+}
+
+async function forceControl(btn) {
+  if (!guardConnected()) return;
+  const row = btn.closest(".control-card");
+  const index = Number(row.dataset.control);
+  const force = Number(btn.dataset.force);
+  if (force !== 0 && row.dataset.enabled !== "1") {
+    toast("请先启用该路IO控制并写入设备，再使用强制ON/OFF", "error");
+    return;
+  }
+  const status = await safe("设置IO强制", () => window.plantApi.setControlForce(index, force));
+  applyControlStatus(status);
 }
 
 async function openDir() {
@@ -463,6 +630,15 @@ function bindEvents() {
   $("#readConfig").addEventListener("click", readConfig);
   $("#writeConfig").addEventListener("click", () => writeConfig(false));
   $("#writeSaveConfig").addEventListener("click", () => writeConfig(true));
+  $("#configHelp").addEventListener("click", showConfigHelp);
+  $("#closeConfigHelp").addEventListener("click", hideConfigHelp);
+  $("#configHelpOverlay").addEventListener("click", (event) => {
+    if (event.target.id === "configHelpOverlay") hideConfigHelp();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !$("#configHelpOverlay").classList.contains("hidden")) hideConfigHelp();
+  });
+  $("#refreshControls").addEventListener("click", () => refreshControls(true));
   $("#openDir").addEventListener("click", openDir);
   $("#downloadFiles").addEventListener("click", downloadFiles);
   $("#deleteFiles").addEventListener("click", deleteFiles);

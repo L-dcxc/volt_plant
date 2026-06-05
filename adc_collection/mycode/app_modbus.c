@@ -3,6 +3,7 @@
 #include "file_browser.h"
 #include "recorder.h"
 #include "battery.h"
+#include "control_outputs.h"
 #include <string.h>
 
 /* Global state */
@@ -14,7 +15,6 @@ static uint16_t g_sample_count = 0U;
 static AppRtcDateTime g_last_sample_time;
 static uint16_t g_system_status = 0U;
 static uint16_t g_last_error_code = 0U;
-static uint8_t g_control_force[APP_CONFIG_CONTROL_COUNT] = {0U, 0U, 0U, 0U};
 static AppModbusReconfigureCb g_reconfigure_cb = NULL;
 
 /* File transfer state (see modbus_register_map.md §0x0060-0x0074). */
@@ -22,6 +22,9 @@ static uint16_t g_file_xfer_state = 0U;
 static uint16_t g_file_index = 0U;
 static uint16_t g_file_err = 0U;
 static uint8_t  g_file_xfer_pending = 0U;
+
+static uint16_t AppModbus_GetReadableChannelMask(void);
+static uint8_t AppModbus_IsReadableChannel(uint8_t channel);
 
 /* Initialize */
 void AppModbus_Init(AppConfigImage *config, AppConfigStore *store)
@@ -48,10 +51,23 @@ void AppModbus_UpdateChannelData(uint8_t channel, uint32_t raw, int32_t uv)
   if (channel >= APP_CONFIG_CHANNEL_COUNT)
     return;
 
+  if (AppModbus_IsReadableChannel(channel) == 0U)
+  {
+    memset(&g_channel_data[channel], 0, sizeof(g_channel_data[channel]));
+    g_ch_valid_mask &= (uint16_t)(~(uint16_t)(1U << channel));
+    return;
+  }
+
   g_channel_data[channel].raw_code = raw;
   g_channel_data[channel].voltage_uv = uv;
   g_channel_data[channel].valid = 1U;
   g_ch_valid_mask |= (1U << channel);
+}
+
+void AppModbus_ClearChannelData(void)
+{
+  memset(g_channel_data, 0, sizeof(g_channel_data));
+  g_ch_valid_mask = 0U;
 }
 
 /* Update system status */
@@ -77,6 +93,72 @@ void AppModbus_UpdateSampleTimestamp(void)
 static uint32_t Unpack32(const uint16_t *regs)
 {
   return ((uint32_t)regs[0] << 16) | regs[1];
+}
+
+static uint16_t AppModbus_GetReadableChannelMask(void)
+{
+  uint16_t enabled_mask = 0U;
+  uint16_t occupied_mask = 0U;
+
+  if (g_config == NULL)
+  {
+    return 0U;
+  }
+
+  for (uint8_t ch = 0U; ch < APP_CONFIG_CHANNEL_COUNT; ch++)
+  {
+    const AppChannelConfig *cfg = &g_config->channels[ch];
+
+    if (cfg->enable == 0U)
+    {
+      continue;
+    }
+
+    enabled_mask |= (uint16_t)(1U << ch);
+
+    if ((cfg->mode == APP_CHANNEL_MODE_DIFFERENTIAL) &&
+        (cfg->negative_input <= APP_ADC_INPUT_AIN15))
+    {
+      occupied_mask |= (uint16_t)(1U << cfg->negative_input);
+    }
+  }
+
+  return (uint16_t)(enabled_mask & (uint16_t)(~occupied_mask));
+}
+
+static uint8_t AppModbus_IsReadableChannel(uint8_t channel)
+{
+  if (channel >= APP_CONFIG_CHANNEL_COUNT)
+  {
+    return 0U;
+  }
+
+  return ((AppModbus_GetReadableChannelMask() & (uint16_t)(1U << channel)) != 0U) ? 1U : 0U;
+}
+
+static uint8_t AppModbus_IsValidControlConfig(const AppControlOutputConfig *ctrl)
+{
+  if (ctrl == NULL)
+  {
+    return 0U;
+  }
+
+  if ((ctrl->enable > 1U) || (ctrl->output_id >= APP_CONFIG_CONTROL_COUNT))
+  {
+    return 0U;
+  }
+
+  if (ctrl->enable != 0U)
+  {
+    if ((ctrl->interval_sec == 0UL) ||
+        (ctrl->on_duration_sec == 0UL) ||
+        (ctrl->on_duration_sec > ctrl->interval_sec))
+    {
+      return 0U;
+    }
+  }
+
+  return 1U;
 }
 
 /* Read Holding Registers (FC03) */
@@ -132,7 +214,7 @@ uint8_t AppModbus_ReadHoldingRegisters(uint16_t start_addr, uint16_t count, uint
     else if (addr >= 0x0050U && addr <= 0x0053U)
     {
       uint8_t ctrl_idx = (uint8_t)(addr - 0x0050U);
-      out_regs[i] = g_control_force[ctrl_idx];
+      out_regs[i] = ControlOutputs_GetForce(ctrl_idx);
     }
 
     /* 0x0100–0x01FF: Channel Config (16 channels × 16 regs) */
@@ -214,7 +296,11 @@ uint8_t AppModbus_ReadInputRegisters(uint16_t start_addr, uint16_t count, uint16
 
       const AppModbusChannelData *ch = &g_channel_data[ch_idx];
 
-      if (reg_offset == 0U) out_regs[i] = (uint16_t)(ch->voltage_uv >> 16);
+      if (AppModbus_IsReadableChannel(ch_idx) == 0U)
+      {
+        out_regs[i] = 0U;
+      }
+      else if (reg_offset == 0U) out_regs[i] = (uint16_t)(ch->voltage_uv >> 16);
       else if (reg_offset == 1U) out_regs[i] = (uint16_t)(ch->voltage_uv & 0xFFFFU);
       else if (reg_offset == 2U) out_regs[i] = (uint16_t)(ch->raw_code >> 16);
       else if (reg_offset == 3U) out_regs[i] = (uint16_t)(ch->raw_code & 0xFFFFU);
@@ -232,20 +318,16 @@ uint8_t AppModbus_ReadInputRegisters(uint16_t start_addr, uint16_t count, uint16
 
       if (reg_offset == 0U)
       {
-        /* STATUS: bit0=output, bit1=enable, bit2=force */
-        uint16_t status = 0U;
-        if (g_config->controls[ctrl_idx].enable != 0U) status |= (1U << 1);
-        if (g_control_force[ctrl_idx] != 0U) status |= (1U << 2);
-        out_regs[i] = status;
+        out_regs[i] = ControlOutputs_GetStatus(ctrl_idx);
       }
       else
       {
-        out_regs[i] = 0U; /* REMAIN_S (not implemented) */
+        out_regs[i] = ControlOutputs_GetRemainSeconds(ctrl_idx);
       }
     }
 
     /* 0x0048–0x004F: Data Freshness */
-    else if (addr == 0x0048U) out_regs[i] = g_ch_valid_mask;
+    else if (addr == 0x0048U) out_regs[i] = (uint16_t)(g_ch_valid_mask & AppModbus_GetReadableChannelMask());
     else if (addr == 0x0049U) out_regs[i] = g_sample_count;
     else if (addr == 0x004AU) out_regs[i] = g_last_sample_time.year;
     else if (addr == 0x004BU) out_regs[i] = ((uint16_t)g_last_sample_time.month << 8) | g_last_sample_time.day;
@@ -352,6 +434,7 @@ uint8_t AppModbus_WriteSingleRegister(uint16_t addr, uint16_t value)
     g_config->adc_vref_mv = value;
     if (g_reconfigure_cb != NULL && g_reconfigure_cb() != 0U)
       return MODBUS_EX_SLAVE_DEVICE_FAILURE;
+    AppModbus_ClearChannelData();
   }
   else if (addr == 0x0021U)
   {
@@ -360,12 +443,14 @@ uint8_t AppModbus_WriteSingleRegister(uint16_t addr, uint16_t value)
     g_config->adc_default_gain = (uint8_t)value;
     if (g_reconfigure_cb != NULL && g_reconfigure_cb() != 0U)
       return MODBUS_EX_SLAVE_DEVICE_FAILURE;
+    AppModbus_ClearChannelData();
   }
   else if (addr == 0x0022U)
   {
     g_config->adc_default_filter = (uint8_t)value;
     if (g_reconfigure_cb != NULL && g_reconfigure_cb() != 0U)
       return MODBUS_EX_SLAVE_DEVICE_FAILURE;
+    AppModbus_ClearChannelData();
   }
 
   /* 0x0030–0x0033: RTC Time */
@@ -387,6 +472,7 @@ uint8_t AppModbus_WriteSingleRegister(uint16_t addr, uint16_t value)
     {
       if (AppConfigStore_SaveDefaults(g_config_store, g_config) != HAL_OK)
         return MODBUS_EX_SLAVE_DEVICE_FAILURE;
+      ControlOutputs_Poll();
     }
     else if (value == 0x0003U) /* Software reset */
     {
@@ -405,7 +491,8 @@ uint8_t AppModbus_WriteSingleRegister(uint16_t addr, uint16_t value)
       return MODBUS_EX_ILLEGAL_DATA_VALUE;
     if (g_config->controls[ctrl_idx].enable == 0U && value != 0U)
       return MODBUS_EX_ILLEGAL_DATA_VALUE; /* Can't force disabled control */
-    g_control_force[ctrl_idx] = (uint8_t)value;
+    ControlOutputs_SetForce(ctrl_idx, (uint8_t)value);
+    ControlOutputs_Poll();
   }
 
   /* 0x0061: FILE_INDEX (stage the index for the next SELECT/START/DELETE) */
@@ -481,9 +568,13 @@ uint8_t AppModbus_WriteSingleRegister(uint16_t addr, uint16_t value)
 uint8_t AppModbus_WriteMultipleRegisters(uint16_t start_addr, uint16_t count, const uint16_t *values)
 {
   uint8_t adc_config_dirty = 0U;
+  uint8_t control_config_dirty = 0U;
+  AppControlOutputConfig next_controls[APP_CONFIG_CONTROL_COUNT];
 
   if (g_config == NULL)
     return MODBUS_EX_SLAVE_DEVICE_FAILURE;
+
+  memcpy(next_controls, g_config->controls, sizeof(next_controls));
 
   /* Validate entire range first */
   for (uint16_t i = 0U; i < count; i++)
@@ -503,6 +594,8 @@ uint8_t AppModbus_WriteMultipleRegisters(uint16_t start_addr, uint16_t count, co
        delegated to FC06, which fires its own reconfigure. */
     if (addr >= 0x0100U && addr <= 0x01FFU)
       adc_config_dirty = 1U;
+    if (addr >= 0x0200U && addr <= 0x022FU)
+      control_config_dirty = 1U;
   }
 
   /* Write all registers */
@@ -614,21 +707,27 @@ uint8_t AppModbus_WriteMultipleRegisters(uint16_t start_addr, uint16_t count, co
       if (ctrl_idx >= APP_CONFIG_CONTROL_COUNT)
         return MODBUS_EX_ILLEGAL_DATA_ADDRESS;
 
-      AppControlOutputConfig *ctrl = &g_config->controls[ctrl_idx];
+      AppControlOutputConfig *ctrl = &next_controls[ctrl_idx];
 
       if (reg_offset == 0x0U)
       {
+        uint8_t enable = (uint8_t)(value >> 8);
+        uint8_t output_id = (uint8_t)(value & 0xFFU);
+        if (enable > 1U || output_id >= APP_CONFIG_CONTROL_COUNT)
+          return MODBUS_EX_ILLEGAL_DATA_VALUE;
         ctrl->enable = (uint8_t)(value >> 8);
         ctrl->output_id = (uint8_t)(value & 0xFFU);
       }
       else if (reg_offset == 0x2U && i + 1U < count)
       {
-        ctrl->interval_sec = Unpack32(&values[i]);
+        uint32_t interval_sec = Unpack32(&values[i]);
+        ctrl->interval_sec = interval_sec;
         i++;
       }
       else if (reg_offset == 0x4U && i + 1U < count)
       {
-        ctrl->on_duration_sec = Unpack32(&values[i]);
+        uint32_t on_duration_sec = Unpack32(&values[i]);
+        ctrl->on_duration_sec = on_duration_sec;
         i++;
       }
       else if (reg_offset == 0x6U && i + 1U < count)
@@ -652,6 +751,19 @@ uint8_t AppModbus_WriteMultipleRegisters(uint16_t start_addr, uint16_t count, co
   {
     if (g_reconfigure_cb() != 0U)
       return MODBUS_EX_SLAVE_DEVICE_FAILURE;
+    AppModbus_ClearChannelData();
+  }
+
+  if (control_config_dirty != 0U)
+  {
+    for (uint8_t i = 0U; i < APP_CONFIG_CONTROL_COUNT; i++)
+    {
+      if (AppModbus_IsValidControlConfig(&next_controls[i]) == 0U)
+        return MODBUS_EX_ILLEGAL_DATA_VALUE;
+    }
+
+    memcpy(g_config->controls, next_controls, sizeof(next_controls));
+    ControlOutputs_Poll();
   }
 
   return 0U; /* Success */

@@ -43,6 +43,7 @@
 #include "file_browser.h"
 #include "ymodem.h"
 #include "battery.h"
+#include "control_outputs.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -463,6 +464,7 @@ int main(void)
 
   /* Bring up the periodic recorder (accumulators + day-rotated SD writer) */
   Recorder_Init(&app_config);
+  ControlOutputs_Init(&app_config);
   Battery_Init();
   (void)Battery_Update();   /* seed an initial reading for the host */
   battery_tick = HAL_GetTick();
@@ -497,6 +499,7 @@ int main(void)
     /* USER CODE BEGIN 3 */
     /* Long-press shutdown: hold ON_OFF low for 3s to cut power */
     AppPower_PollShutdown();
+    ControlOutputs_Poll();
 
     /* Heartbeat: blink green LED ~2 Hz */
     if ((HAL_GetTick() - led_blink_tick) >= 250U)

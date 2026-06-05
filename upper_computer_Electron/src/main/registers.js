@@ -12,15 +12,20 @@ const HR = {
   ADC_DEFAULT_GAIN: 0x0021,
   RTC_YEAR: 0x0030,
   COMMAND: 0x0040,
+  CONTROL_FORCE_BASE: 0x0050,
   FILE_CMD: 0x0060,
   FILE_INDEX: 0x0061,
   CHANNEL_BASE: 0x0100,
   CHANNEL_STRIDE: 0x10,
+  CONTROL_BASE: 0x0200,
+  CONTROL_STRIDE: 0x0c,
 };
 
 const IR = {
   CHANNEL_BASE: 0x0000,
   CHANNEL_STRIDE: 4,
+  CONTROL_STATUS_BASE: 0x0040,
+  CONTROL_STATUS_STRIDE: 2,
   CH_VALID_MASK: 0x0048,
   SYS_STATUS: 0x0050,
   SD_TOTAL_MB_H: 0x0054,
@@ -60,6 +65,21 @@ const CHANNEL = {
   OFF_SCALE_L: 9,
   OFF_WARMUP_H: 10,
   OFF_WARMUP_L: 11,
+};
+
+const CONTROL = {
+  COUNT: 4,
+  REG_COUNT: 0x0c,
+  OFF_FLAGS: 0,
+  OFF_INTERVAL_H: 2,
+  OFF_INTERVAL_L: 3,
+  OFF_ON_DURATION_H: 4,
+  OFF_ON_DURATION_L: 5,
+  OFF_PHASE_H: 6,
+  OFF_PHASE_L: 7,
+  FORCE_AUTO: 0,
+  FORCE_ON: 1,
+  FORCE_OFF: 2,
 };
 
 const GAIN_VALUES = [1, 2, 4, 8, 16, 32, 64, 128];
@@ -114,6 +134,14 @@ function channelDataBase(ch) {
   return IR.CHANNEL_BASE + ch * IR.CHANNEL_STRIDE;
 }
 
+function controlBase(index) {
+  return HR.CONTROL_BASE + index * HR.CONTROL_STRIDE;
+}
+
+function controlStatusBase(index) {
+  return IR.CONTROL_STATUS_BASE + index * IR.CONTROL_STATUS_STRIDE;
+}
+
 function decodeFileName(regs) {
   const chars = [];
   for (const item of regs) {
@@ -132,6 +160,7 @@ module.exports = {
   CMD,
   FILE_CMD,
   CHANNEL,
+  CONTROL,
   GAIN_VALUES,
   ADC_INPUT_AVSS,
   SYS_BITS,
@@ -144,5 +173,7 @@ module.exports = {
   unpackBytes,
   channelBase,
   channelDataBase,
+  controlBase,
+  controlStatusBase,
   decodeFileName,
 };

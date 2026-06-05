@@ -1449,6 +1449,11 @@
               <FileType>1</FileType>
               <FilePath>..\mycode\battery.c</FilePath>
             </File>
+            <File>
+              <FileName>control_outputs.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\mycode\control_outputs.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

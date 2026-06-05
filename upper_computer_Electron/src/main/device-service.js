@@ -25,6 +25,8 @@ class DeviceService {
     ipcMain.handle("device:channels:read", (_event, channels) => this.readChannels(channels));
     ipcMain.handle("device:config:read", () => this.readConfig());
     ipcMain.handle("device:config:write", (_event, payload) => this.writeConfig(payload));
+    ipcMain.handle("device:controls:readStatus", () => this.readControlStatuses());
+    ipcMain.handle("device:controls:force", (_event, index, force) => this.setControlForce(index, force));
     ipcMain.handle("files:openDir", () => this.openDir());
     ipcMain.handle("files:delete", (_event, rows) => this.deleteFiles(rows));
     ipcMain.handle("files:download", (event, rows) => this.downloadFiles(event, rows));
@@ -104,14 +106,16 @@ class DeviceService {
 
   async readChannels(channels) {
     const validMask = (await this.client.readInput(reg.IR.CH_VALID_MASK, 1))[0];
+    const displayMask = await this._readChannelDisplayMask();
     const rows = [];
     for (const ch of channels) {
       const data = await this.client.readInput(reg.channelDataBase(ch), 4);
+      const valid = Boolean((validMask & displayMask) & (1 << ch));
       rows.push({
         ch,
-        voltageUv: reg.joinS32(data[0], data[1]),
-        raw: reg.joinU32(data[2], data[3]) & 0xffffff,
-        valid: Boolean(validMask & (1 << ch)),
+        voltageUv: valid ? reg.joinS32(data[0], data[1]) : 0,
+        raw: valid ? (reg.joinU32(data[2], data[3]) & 0xffffff) : 0,
+        valid,
       });
     }
     return rows;
@@ -124,6 +128,13 @@ class DeviceService {
     for (let ch = 0; ch < reg.CHANNEL.COUNT; ch++) {
       channels.push(this._decodeChannel(ch, await this.client.readHolding(reg.channelBase(ch), reg.CHANNEL.REG_COUNT)));
     }
+    const controls = [];
+    for (let index = 0; index < reg.CONTROL.COUNT; index++) {
+      const cfgRegs = await this.client.readHolding(reg.controlBase(index), reg.CONTROL.REG_COUNT);
+      const force = (await this.client.readHolding(reg.HR.CONTROL_FORCE_BASE + index, 1))[0];
+      const statusRegs = await this.client.readInput(reg.controlStatusBase(index), reg.IR.CONTROL_STATUS_STRIDE);
+      controls.push(this._decodeControl(index, cfgRegs, force, statusRegs));
+    }
     return {
       modbusAddr: sys[0],
       baudRate: reg.joinU32(sys[1], sys[2]),
@@ -135,10 +146,12 @@ class DeviceService {
       adcVrefMv: adc[0],
       adcDefaultGain: adc[1],
       channels,
+      controls,
     };
   }
 
   async writeConfig(config) {
+    const channels = this._normalizeDifferentialPairs(config.channels || []);
     await this.client.writeMultiple(reg.HR.BAUD_H, reg.splitU32(config.baudRate));
     await this.client.writeSingle(reg.HR.MODBUS_ADDR, config.modbusAddr);
     await this.client.writeSingle(reg.HR.AVG_ENABLE, config.avgEnable ? 1 : 0);
@@ -147,16 +160,35 @@ class DeviceService {
       ...reg.splitU32(config.sampleIntervalSec),
       ...reg.splitU32(config.recordIntervalSec),
     ]);
-    await this.client.writeMultiple(reg.HR.ADC_VREF_MV, [
-      config.adcVrefMv,
-      config.adcDefaultGain,
-      0,
-    ]);
-    for (const ch of config.channels) {
+    await this.client.writeSingle(reg.HR.ADC_DEFAULT_GAIN, config.adcDefaultGain);
+    for (const ch of channels) {
       await this.client.writeMultiple(reg.channelBase(ch.ch), this._encodeChannel(ch));
+    }
+    for (const control of config.controls || []) {
+      await this.client.writeMultiple(reg.controlBase(control.index), this._encodeControl(control));
     }
     if (config.save) await this.client.writeSingle(reg.HR.COMMAND, reg.CMD.SAVE_CONFIG);
     return true;
+  }
+
+  async readControlStatuses() {
+    const controls = [];
+    for (let index = 0; index < reg.CONTROL.COUNT; index++) {
+      const force = (await this.client.readHolding(reg.HR.CONTROL_FORCE_BASE + index, 1))[0];
+      const statusRegs = await this.client.readInput(reg.controlStatusBase(index), reg.IR.CONTROL_STATUS_STRIDE);
+      controls.push(this._decodeControlStatus(index, force, statusRegs));
+    }
+    return controls;
+  }
+
+  async setControlForce(index, force) {
+    const i = Number(index);
+    const mode = Number(force);
+    if (i < 0 || i >= reg.CONTROL.COUNT) throw new Error("控制输出编号无效");
+    if (mode < reg.CONTROL.FORCE_AUTO || mode > reg.CONTROL.FORCE_OFF) throw new Error("控制模式无效");
+    await this.client.writeSingle(reg.HR.CONTROL_FORCE_BASE + i, mode);
+    const statusRegs = await this.client.readInput(reg.controlStatusBase(i), reg.IR.CONTROL_STATUS_STRIDE);
+    return this._decodeControlStatus(i, mode, statusRegs);
   }
 
   async openDir() {
@@ -236,6 +268,38 @@ class DeviceService {
     return result;
   }
 
+  async _readChannelDisplayMask() {
+    let enabledMask = 0;
+    let occupiedMask = 0;
+
+    for (let ch = 0; ch < reg.CHANNEL.COUNT; ch++) {
+      const r = await this.client.readHolding(reg.channelBase(ch), 2);
+      const [enable, mode] = reg.unpackBytes(r[reg.CHANNEL.OFF_FLAGS]);
+      const [_pos, neg] = reg.unpackBytes(r[reg.CHANNEL.OFF_INPUTS]);
+      if (!enable) continue;
+      enabledMask |= (1 << ch);
+      if (mode === 1 && neg >= 0 && neg < reg.CHANNEL.COUNT) {
+        occupiedMask |= (1 << neg);
+      }
+    }
+
+    return enabledMask & ~occupiedMask;
+  }
+
+  _normalizeDifferentialPairs(channels) {
+    const normalized = channels.map((ch) => ({ ...ch }));
+    for (const ch of normalized) {
+      if (!ch.enable || Number(ch.mode) !== 1) continue;
+      const pair = Number(ch.ch) % 2 === 0 ? Number(ch.ch) + 1 : Number(ch.ch) - 1;
+      const pairCfg = normalized.find((item) => Number(item.ch) === pair);
+      if (pairCfg) {
+        pairCfg.enable = false;
+        pairCfg.mode = 0;
+      }
+    }
+    return normalized;
+  }
+
   _decodeChannel(ch, r) {
     const [enable, mode] = reg.unpackBytes(r[reg.CHANNEL.OFF_FLAGS]);
     const [_pos, _neg] = reg.unpackBytes(r[reg.CHANNEL.OFF_INPUTS]);
@@ -269,6 +333,42 @@ class DeviceService {
     regs[reg.CHANNEL.OFF_SCALE_L] = reg.splitS32(ch.scalePpm)[1];
     regs[reg.CHANNEL.OFF_WARMUP_H] = reg.splitU32(ch.warmupMs)[0];
     regs[reg.CHANNEL.OFF_WARMUP_L] = reg.splitU32(ch.warmupMs)[1];
+    return regs;
+  }
+
+  _decodeControl(index, r, force, statusRegs) {
+    const [enable, outputId] = reg.unpackBytes(r[reg.CONTROL.OFF_FLAGS]);
+    return {
+      ...this._decodeControlStatus(index, force, statusRegs),
+      enable: Boolean(enable),
+      outputId,
+      intervalSec: reg.joinU32(r[reg.CONTROL.OFF_INTERVAL_H], r[reg.CONTROL.OFF_INTERVAL_L]),
+      onDurationSec: reg.joinU32(r[reg.CONTROL.OFF_ON_DURATION_H], r[reg.CONTROL.OFF_ON_DURATION_L]),
+      phaseOffsetSec: reg.joinU32(r[reg.CONTROL.OFF_PHASE_H], r[reg.CONTROL.OFF_PHASE_L]),
+    };
+  }
+
+  _decodeControlStatus(index, force, statusRegs) {
+    const status = statusRegs[0] || 0;
+    return {
+      index,
+      force: Number(force) || 0,
+      output: Boolean(status & 0x01),
+      enabled: Boolean(status & 0x02),
+      forced: Boolean(status & 0x04),
+      remainSec: statusRegs[1] || 0,
+    };
+  }
+
+  _encodeControl(control) {
+    const regs = new Array(reg.CONTROL.REG_COUNT).fill(0);
+    regs[reg.CONTROL.OFF_FLAGS] = reg.packBytes(control.enable ? 1 : 0, Number(control.outputId));
+    regs[reg.CONTROL.OFF_INTERVAL_H] = reg.splitU32(control.intervalSec)[0];
+    regs[reg.CONTROL.OFF_INTERVAL_L] = reg.splitU32(control.intervalSec)[1];
+    regs[reg.CONTROL.OFF_ON_DURATION_H] = reg.splitU32(control.onDurationSec)[0];
+    regs[reg.CONTROL.OFF_ON_DURATION_L] = reg.splitU32(control.onDurationSec)[1];
+    regs[reg.CONTROL.OFF_PHASE_H] = reg.splitU32(control.phaseOffsetSec)[0];
+    regs[reg.CONTROL.OFF_PHASE_L] = reg.splitU32(control.phaseOffsetSec)[1];
     return regs;
   }
 }
