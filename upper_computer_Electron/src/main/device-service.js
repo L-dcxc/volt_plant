@@ -37,7 +37,12 @@ class DeviceService {
   }
 
   async connect(opts) {
-    await this.client.connect(opts);
+    await this.client.connect({
+      timeoutMs: 1800,
+      retries: 5,
+      settleMs: 500,
+      ...opts,
+    });
     return this.readDeviceInfo();
   }
 

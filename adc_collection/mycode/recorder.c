@@ -15,6 +15,8 @@
 #define RECORDER_PATH_BUF_SIZE   32U
 #define RECORDER_NAME_BUF_SIZE   16U
 #define RECORDER_SD_RETRY_MS     5000U
+#define RECORDER_CACHE_MAX_LINES 32U
+#define RECORDER_CACHE_MAX_SECONDS 1800UL
 
 /* Ring-overwrite: when free space drops below this floor, the oldest data
    file (smallest YYMMDD name) is deleted to make room — like a dashcam. The
@@ -39,6 +41,8 @@ static uint8_t  s_record_tick_inited = 0U;
 static uint32_t s_last_mount_attempt_tick = 0U;
 static uint8_t  s_sd_mounted = 0U;
 static uint8_t  s_sd_ok = 0U;
+static char     s_line_cache[RECORDER_CACHE_MAX_LINES][RECORDER_LINE_BUF_SIZE];
+static uint8_t  s_line_cache_count = 0U;
 
 /* Cached capacity (KiB), refreshed after each flush so the Modbus layer can
    report it without triggering a full FAT scan on every register read. */
@@ -55,6 +59,55 @@ static void Recorder_ClearAcc(void)
 {
   memset(s_acc_uv, 0, sizeof(s_acc_uv));
   memset(s_acc_count, 0, sizeof(s_acc_count));
+}
+
+static void Recorder_ClearLineCache(void)
+{
+  s_line_cache_count = 0U;
+}
+
+static uint8_t Recorder_TargetCacheLines(void)
+{
+  uint32_t sample_s;
+  uint32_t target_s;
+  uint32_t lines;
+
+  if (s_config == NULL)
+  {
+    return 1U;
+  }
+
+  sample_s = s_config->sample_interval_sec;
+  if (sample_s == 0UL)
+  {
+    sample_s = 1UL;
+  }
+
+  target_s = s_config->record_interval_sec;
+  if (target_s == 0UL)
+  {
+    target_s = sample_s;
+  }
+  if (target_s > RECORDER_CACHE_MAX_SECONDS)
+  {
+    target_s = RECORDER_CACHE_MAX_SECONDS;
+  }
+  if (target_s < sample_s)
+  {
+    target_s = sample_s;
+  }
+
+  lines = (target_s + sample_s - 1UL) / sample_s;
+  if (lines < 1UL)
+  {
+    lines = 1UL;
+  }
+  if (lines > RECORDER_CACHE_MAX_LINES)
+  {
+    lines = RECORDER_CACHE_MAX_LINES;
+  }
+
+  return (uint8_t)lines;
 }
 
 static const char *Recorder_ExtensionFor(uint8_t file_format)
@@ -341,7 +394,7 @@ static FRESULT Recorder_WriteHeader(FIL *file)
   return FR_OK;
 }
 
-static FRESULT Recorder_FlushLine(const char *line)
+static FRESULT Recorder_FlushLines(char lines[][RECORDER_LINE_BUF_SIZE], uint8_t count)
 {
   char file_name[RECORDER_NAME_BUF_SIZE];
   char path[RECORDER_PATH_BUF_SIZE];
@@ -349,8 +402,12 @@ static FRESULT Recorder_FlushLine(const char *line)
   UINT written = 0U;
   UINT length;
   FRESULT result;
-  uint32_t line_len;
   char crlf[3];
+
+  if ((lines == NULL) || (count == 0U))
+  {
+    return FR_OK;
+  }
 
   if (Recorder_BuildFileName(file_name, sizeof(file_name)) == 0U)
   {
@@ -387,20 +444,23 @@ static FRESULT Recorder_FlushLine(const char *line)
     }
   }
 
-  line_len = (uint32_t)strlen(line);
-  length = (UINT)line_len;
-  result = f_write(&file, line, length, &written);
-  if (result == FR_OK && written != length)
+  for (uint8_t i = 0U; i < count && result == FR_OK; i++)
   {
-    result = FR_DISK_ERR;
-  }
+    uint32_t line_len = (uint32_t)strlen(lines[i]);
+    length = (UINT)line_len;
+    result = f_write(&file, lines[i], length, &written);
+    if (result == FR_OK && written != length)
+    {
+      result = FR_DISK_ERR;
+    }
 
-  if (result == FR_OK)
-  {
-    crlf[0] = '\r';
-    crlf[1] = '\n';
-    crlf[2] = '\0';
-    result = f_write(&file, crlf, 2U, &written);
+    if (result == FR_OK)
+    {
+      crlf[0] = '\r';
+      crlf[1] = '\n';
+      crlf[2] = '\0';
+      result = f_write(&file, crlf, 2U, &written);
+    }
     if (result == FR_OK && written != 2U)
     {
       result = FR_DISK_ERR;
@@ -420,6 +480,59 @@ static FRESULT Recorder_FlushLine(const char *line)
   if (result == FR_OK)
   {
     Recorder_RefreshCapacity();
+  }
+
+  return result;
+}
+
+static FRESULT Recorder_FlushCachedLines(void)
+{
+  FRESULT result;
+
+  if (s_line_cache_count == 0U)
+  {
+    return FR_OK;
+  }
+
+  result = Recorder_FlushLines(s_line_cache, s_line_cache_count);
+  if (result == FR_OK)
+  {
+    Recorder_ClearLineCache();
+  }
+
+  return result;
+}
+
+static FRESULT Recorder_QueueLine(const char *line, uint8_t force_flush)
+{
+  FRESULT result = FR_OK;
+  uint8_t target_lines;
+
+  if (line == NULL)
+  {
+    return FR_INVALID_PARAMETER;
+  }
+
+  target_lines = Recorder_TargetCacheLines();
+
+  if (s_line_cache_count >= RECORDER_CACHE_MAX_LINES)
+  {
+    result = Recorder_FlushCachedLines();
+    if (result != FR_OK)
+    {
+      return result;
+    }
+  }
+
+  (void)snprintf(s_line_cache[s_line_cache_count],
+                 RECORDER_LINE_BUF_SIZE,
+                 "%s",
+                 line);
+  s_line_cache_count++;
+
+  if ((force_flush != 0U) || (s_line_cache_count >= target_lines))
+  {
+    result = Recorder_FlushCachedLines();
   }
 
   return result;
@@ -495,8 +608,11 @@ void Recorder_OnScanComplete(void)
   {
     Recorder_BuildDataLine(line, sizeof(line), 'S', timestamp,
                             s_scan_uv, s_scan_count);
-    fr = Recorder_FlushLine(line);
-    s_sd_ok = (fr == FR_OK) ? 1U : 0U;
+    fr = Recorder_QueueLine(line, 0U);
+    if (fr != FR_OK)
+    {
+      s_sd_ok = 0U;
+    }
   }
   Recorder_ClearScan();
 
@@ -519,7 +635,19 @@ void Recorder_OnScanComplete(void)
       {
         Recorder_BuildDataLine(line, sizeof(line), 'A', timestamp,
                                 s_acc_uv, s_acc_count);
-        fr = Recorder_FlushLine(line);
+        fr = Recorder_QueueLine(line, 1U);
+        if (fr != FR_OK)
+        {
+          s_sd_ok = 0U;
+        }
+        else
+        {
+          s_sd_ok = 1U;
+        }
+      }
+      else
+      {
+        fr = Recorder_FlushCachedLines();
         if (fr != FR_OK)
         {
           s_sd_ok = 0U;
@@ -539,6 +667,26 @@ void Recorder_OnScanComplete(void)
       }
     }
   }
+}
+
+uint8_t Recorder_Flush(void)
+{
+  FRESULT fr;
+
+  if (s_line_cache_count == 0U)
+  {
+    return s_sd_ok;
+  }
+
+  fr = Recorder_FlushCachedLines();
+  if (fr == FR_OK)
+  {
+    s_sd_ok = 1U;
+    return 1U;
+  }
+
+  s_sd_ok = 0U;
+  return 0U;
 }
 
 uint8_t Recorder_GetSdOk(void)

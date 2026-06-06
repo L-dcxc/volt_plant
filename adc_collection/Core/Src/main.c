@@ -56,6 +56,12 @@
 #define APP_POWER_ON_HOLD_TIME_MS 2000U
 #define APP_POWER_ON_CHECK_PERIOD_MS 10U
 #define APP_POWER_OFF_HOLD_TIME_MS 3000U
+#define APP_IDLE_SLEEP_MIN_MS 20U
+#define APP_SERIAL_ACTIVE_HOLD_MS 60000U
+#define APP_KEY0_HOLD_TIME_MS 2000U
+#define APP_KEY0_ACTIVE_HOLD_MS 60000U
+#define APP_SLEEP_LED_FLASH_MS 120U
+#define APP_STOP2_MAX_SLEEP_SECONDS 5U
 
 /* USER CODE END PD */
 
@@ -82,6 +88,12 @@ static uint8_t sd_ok = 0U;
 static uint32_t sample_tick = 0U;
 static uint8_t prev_run_enable = 0U;
 static uint32_t battery_tick = 0U;
+static uint32_t key0_active_until_tick = 0U;
+static uint8_t idle_sleep_state = 0U;
+static uint8_t led_notice_active = 0U;
+static uint8_t led_notice_phase = 0U;
+static uint32_t led_notice_tick = 0U;
+static volatile uint8_t stop2_rtc_wakeup = 0U;
 #define BATTERY_UPDATE_INTERVAL_MS  30000U
 
 /* USER CODE END PV */
@@ -90,6 +102,7 @@ static uint32_t battery_tick = 0U;
 void SystemClock_Config(void);
 void PeriphCommonClock_Config(void);
 /* USER CODE BEGIN PFP */
+static void AppUart1_EnableStopWakeup(void);
 
 /* USER CODE END PFP */
 
@@ -149,21 +162,6 @@ static uint8_t AppPower_CheckOnOffLowAndLatch(void)
   return 1U;
 }
 
-static uint8_t AppPower_ReadOutputData(GPIO_TypeDef *gpio_port, uint16_t gpio_pin)
-{
-  return ((gpio_port->ODR & gpio_pin) != 0U) ? 1U : 0U;
-}
-
-static void AppPower_PrintDiag(const char *tag)
-{
-  printf("[PWR] %s: ON_OFF=%u KEY_PWR=%u PWR_ON_IDR=%u PWR_ON_ODR=%u\r\n",
-         tag,
-         (unsigned)((HAL_GPIO_ReadPin(ON_OFF_GPIO_Port, ON_OFF_Pin) == GPIO_PIN_SET) ? 1U : 0U),
-         (unsigned)((HAL_GPIO_ReadPin(KEY_PWR_GPIO_Port, KEY_PWR_Pin) == GPIO_PIN_SET) ? 1U : 0U),
-         (unsigned)((HAL_GPIO_ReadPin(PWR_ON_GPIO_Port, PWR_ON_Pin) == GPIO_PIN_SET) ? 1U : 0U),
-         (unsigned)AppPower_ReadOutputData(PWR_ON_GPIO_Port, PWR_ON_Pin));
-}
-
 /* Modbus reconfigure callback: re-apply current config to AD7124 hardware.
    Returns 0 on success, 1 on failure (becomes a Modbus exception). */
 static uint8_t AppModbus_ReconfigureAd7124(void)
@@ -196,6 +194,7 @@ static void AppPower_PollShutdown(void)
     {
       /* Held long enough: cut power. This removes the board's own supply,
          so execution stops here once the rail collapses. */
+      (void)Recorder_Flush();
       HAL_GPIO_WritePin(PWR_ON_GPIO_Port, PWR_ON_Pin, GPIO_PIN_RESET);
       while (1)
       {
@@ -210,6 +209,311 @@ static void AppPower_PollShutdown(void)
     /* Released before hold time elapsed: cancel */
     press_active = 0U;
   }
+}
+
+static void AppUart1_EnableStopWakeup(void)
+{
+  UART_WakeUpTypeDef wakeup_config = {0};
+
+  wakeup_config.WakeUpEvent = UART_WAKEUP_ON_STARTBIT;
+  if (HAL_UARTEx_StopModeWakeUpSourceConfig(&huart1, wakeup_config) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_EnableClockStopMode(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_EnableStopMode(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_WUF);
+  __HAL_UART_ENABLE_IT(&huart1, UART_IT_WUF);
+}
+
+static uint8_t AppSamplingDueSoon(uint32_t now_tick)
+{
+  uint32_t interval_ms;
+  uint32_t elapsed;
+
+  if ((app_config.run_enable == 0U) || (ad7124_ready == 0U))
+  {
+    return 0U;
+  }
+
+  interval_ms = app_config.sample_interval_sec * 1000UL;
+  if (interval_ms == 0UL)
+  {
+    interval_ms = 1000UL;
+  }
+
+  elapsed = now_tick - sample_tick;
+  if (elapsed >= interval_ms)
+  {
+    return 1U;
+  }
+
+  return ((interval_ms - elapsed) <= APP_IDLE_SLEEP_MIN_MS) ? 1U : 0U;
+}
+
+static uint32_t AppNextStop2SleepSeconds(uint32_t now_tick)
+{
+  uint32_t sleep_seconds = APP_STOP2_MAX_SLEEP_SECONDS;
+
+  if ((app_config.run_enable != 0U) && (ad7124_ready != 0U))
+  {
+    uint32_t interval_ms = app_config.sample_interval_sec * 1000UL;
+    uint32_t elapsed;
+    uint32_t remaining_ms;
+    uint32_t sample_limited_seconds;
+
+    if (interval_ms == 0UL)
+    {
+      interval_ms = 1000UL;
+    }
+
+    elapsed = now_tick - sample_tick;
+    if (elapsed >= interval_ms)
+    {
+      return 0UL;
+    }
+
+    remaining_ms = interval_ms - elapsed;
+    if (remaining_ms <= APP_IDLE_SLEEP_MIN_MS)
+    {
+      return 0UL;
+    }
+
+    /* RTC wakeup uses a 1 Hz clock here, so round down. If less than one
+       second remains, stay awake and let the normal scheduler run the scan. */
+    sample_limited_seconds = remaining_ms / 1000UL;
+    if (sample_limited_seconds == 0UL)
+    {
+      return 0UL;
+    }
+    if (sample_limited_seconds < sleep_seconds)
+    {
+      sleep_seconds = sample_limited_seconds;
+    }
+  }
+
+  return sleep_seconds;
+}
+
+static uint8_t AppSerialRecentlyActive(uint32_t now_tick)
+{
+  if (modbus_enabled == 0U)
+  {
+    return 0U;
+  }
+
+  return ((now_tick - ModbusRtu_LastRxTick()) <= APP_SERIAL_ACTIVE_HOLD_MS) ? 1U : 0U;
+}
+
+static uint8_t AppKey0ActiveWindow(uint32_t now_tick)
+{
+  if (key0_active_until_tick == 0U)
+  {
+    return 0U;
+  }
+
+  if ((int32_t)(key0_active_until_tick - now_tick) > 0)
+  {
+    return 1U;
+  }
+
+  key0_active_until_tick = 0U;
+  return 0U;
+}
+
+static void AppSetAllStatusLeds(GPIO_PinState state)
+{
+  HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, state);
+  HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, state);
+  HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, state);
+}
+
+static void AppLedNoticeStart(void)
+{
+  led_notice_active = 1U;
+  led_notice_phase = 0U;
+  led_notice_tick = HAL_GetTick();
+  AppSetAllStatusLeds(GPIO_PIN_SET);
+}
+
+static uint8_t AppLedNoticePoll(void)
+{
+  if (led_notice_active == 0U)
+  {
+    return 0U;
+  }
+
+  if ((HAL_GetTick() - led_notice_tick) < APP_SLEEP_LED_FLASH_MS)
+  {
+    return 1U;
+  }
+
+  led_notice_tick = HAL_GetTick();
+  if (led_notice_phase == 0U)
+  {
+    led_notice_phase = 1U;
+    AppSetAllStatusLeds(GPIO_PIN_RESET);
+    return 1U;
+  }
+
+  led_notice_active = 0U;
+  led_notice_phase = 0U;
+  return 0U;
+}
+
+static void AppAdvanceHalTick(uint32_t elapsed_ms)
+{
+  while (elapsed_ms > 0UL)
+  {
+    HAL_IncTick();
+    elapsed_ms--;
+  }
+}
+
+void HAL_RTCEx_WakeUpTimerEventCallback(RTC_HandleTypeDef *hrtc)
+{
+  (void)hrtc;
+  stop2_rtc_wakeup = 1U;
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == KEY0_Pin)
+  {
+    key0_active_until_tick = HAL_GetTick() + APP_KEY0_ACTIVE_HOLD_MS;
+    led_blink_tick = 0U;
+    if (idle_sleep_state != 0U)
+    {
+      idle_sleep_state = 0U;
+      AppLedNoticeStart();
+    }
+  }
+}
+
+static void AppEnterStop2Slice(uint32_t sleep_seconds)
+{
+  HAL_StatusTypeDef rtc_status;
+
+  if (sleep_seconds == 0UL)
+  {
+    return;
+  }
+
+  AppSetAllStatusLeds(GPIO_PIN_RESET);
+
+  (void)HAL_RTCEx_DeactivateWakeUpTimer(&hrtc);
+  stop2_rtc_wakeup = 0U;
+  rtc_status = HAL_RTCEx_SetWakeUpTimer_IT(&hrtc,
+                                           sleep_seconds,
+                                           RTC_WAKEUPCLOCK_CK_SPRE_16BITS);
+  if (rtc_status != HAL_OK)
+  {
+    HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+    return;
+  }
+
+  HAL_SuspendTick();
+  HAL_PWREx_EnterSTOP2Mode(PWR_STOPENTRY_WFI);
+
+  SystemClock_Config();
+  HAL_ResumeTick();
+  if (stop2_rtc_wakeup != 0U)
+  {
+    AppAdvanceHalTick(sleep_seconds * 1000UL);
+  }
+  HAL_IWDG_Refresh(&hiwdg);
+  (void)HAL_RTCEx_DeactivateWakeUpTimer(&hrtc);
+}
+
+static void AppKey0_PollModeToggle(void)
+{
+  static uint8_t press_active = 0U;
+  static uint8_t toggled_this_press = 0U;
+  static uint32_t press_start_tick = 0U;
+
+  if (HAL_GPIO_ReadPin(KEY0_GPIO_Port, KEY0_Pin) == GPIO_PIN_RESET)
+  {
+    if (press_active == 0U)
+    {
+      press_active = 1U;
+      toggled_this_press = 0U;
+      press_start_tick = HAL_GetTick();
+    }
+    else if ((toggled_this_press == 0U) &&
+             ((HAL_GetTick() - press_start_tick) >= APP_KEY0_HOLD_TIME_MS))
+    {
+      key0_active_until_tick = HAL_GetTick() + APP_KEY0_ACTIVE_HOLD_MS;
+      toggled_this_press = 1U;
+      led_blink_tick = 0U;
+      AppLedNoticeStart();
+    }
+  }
+  else
+  {
+    press_active = 0U;
+    toggled_this_press = 0U;
+  }
+}
+
+static void AppMaybeSleepIdle(void)
+{
+  uint32_t sleep_seconds;
+
+  if (AppKey0ActiveWindow(HAL_GetTick()) != 0U)
+  {
+    if (idle_sleep_state != 0U)
+    {
+      idle_sleep_state = 0U;
+      AppLedNoticeStart();
+    }
+    return;
+  }
+
+  if (AppSerialRecentlyActive(HAL_GetTick()) != 0U)
+  {
+    if (idle_sleep_state != 0U)
+    {
+      idle_sleep_state = 0U;
+      AppLedNoticeStart();
+    }
+    return;
+  }
+
+  if (AppModbus_FileXferStartPending() != 0U)
+  {
+    return;
+  }
+
+  if (AppSamplingDueSoon(HAL_GetTick()) != 0U)
+  {
+    return;
+  }
+
+  if (AppLedNoticePoll() != 0U)
+  {
+    return;
+  }
+
+  if (idle_sleep_state == 0U)
+  {
+    idle_sleep_state = 1U;
+    AppLedNoticeStart();
+    return;
+  }
+
+  sleep_seconds = AppNextStop2SleepSeconds(HAL_GetTick());
+  if (sleep_seconds == 0UL)
+  {
+    return;
+  }
+
+  AppEnterStop2Slice(sleep_seconds);
 }
 
 /* USER CODE END 0 */
@@ -260,16 +564,15 @@ int main(void)
   MX_FATFS_Init();
   MX_RTC_Init();
   /* USER CODE BEGIN 2 */
+  AppUart1_EnableStopWakeup();
   {
     uint8_t power_latched;
 
   /* Latch main power rail: PWR_ON is active-high, must be set ASAP so the
      +2.8V_ADC rail (and other downstream rails) stay on after the boot key
      is released. AD7124 needs this to be powered. */
-  /* AppPower_PrintDiag("before latch"); */
   power_latched = AppPower_CheckOnOffLowAndLatch();
   (void)power_latched;
-  /* AppPower_PrintDiag("after latch"); */
   AD7124_BoardPowerOn(500U);
 
   /* printf("OPEN is OK!!!\r\n"); */
@@ -499,13 +802,29 @@ int main(void)
     /* USER CODE BEGIN 3 */
     /* Long-press shutdown: hold ON_OFF low for 3s to cut power */
     AppPower_PollShutdown();
+    AppKey0_PollModeToggle();
     ControlOutputs_Poll();
 
-    /* Heartbeat: blink green LED ~2 Hz */
-    if ((HAL_GetTick() - led_blink_tick) >= 250U)
+    uint8_t notice_running = AppLedNoticePoll();
+
+    /* Heartbeat: only blink while the host is recently active. In idle sleep
+       the LED stays off, avoiding short duty-cycle ghost flashes. */
+    if (notice_running != 0U)
     {
-      led_blink_tick = HAL_GetTick();
-      HAL_GPIO_TogglePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin);
+      /* Let the three-LED notice finish without heartbeat overriding it. */
+    }
+    else if ((AppKey0ActiveWindow(HAL_GetTick()) != 0U) ||
+             (AppSerialRecentlyActive(HAL_GetTick()) != 0U))
+    {
+      if ((HAL_GetTick() - led_blink_tick) >= 250U)
+      {
+        led_blink_tick = HAL_GetTick();
+        HAL_GPIO_TogglePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin);
+      }
+    }
+    else
+    {
+      HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
     }
 
     /* Edge-detect run_enable 0->1: reset cadence so a freshly-started run
@@ -513,8 +832,13 @@ int main(void)
        starts clean. */
     if ((app_config.run_enable != 0U) && (prev_run_enable == 0U))
     {
+      sd_ok = Recorder_Flush();
       sample_tick = HAL_GetTick();
       Recorder_ResetTiming();
+    }
+    else if ((app_config.run_enable == 0U) && (prev_run_enable != 0U))
+    {
+      sd_ok = Recorder_Flush();
     }
     prev_run_enable = app_config.run_enable;
 
@@ -648,6 +972,7 @@ int main(void)
         char file_path[FILE_BROWSER_NAME_SIZE + 8U];
         YModemResult yr;
 
+        sd_ok = Recorder_Flush();
         FileBrowser_BuildSelectedPath(file_path, sizeof(file_path));
 
         /* ModbusRtu_PauseRx was already called inside WriteSingleRegister
@@ -668,6 +993,8 @@ int main(void)
         }
       }
     }
+
+    AppMaybeSleepIdle();
   }
   /* USER CODE END 3 */
 }
@@ -696,10 +1023,12 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE
-                              |RCC_OSCILLATORTYPE_LSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_LSI
+                              |RCC_OSCILLATORTYPE_HSE|RCC_OSCILLATORTYPE_LSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.LSEState = RCC_LSE_ON;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;

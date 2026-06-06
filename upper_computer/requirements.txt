@@ -1,5 +1,0 @@
-# 上位机依赖
-# 安装: pip install -r requirements.txt
-PyQt5>=5.15
-pymodbus>=3.0,<3.7
-pyserial>=3.5

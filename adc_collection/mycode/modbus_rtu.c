@@ -374,3 +374,13 @@ void ModbusRtu_Poll(void)
     ProcessFrame(g_modbus.frame_buf, g_modbus.frame_len);
   }
 }
+
+uint32_t ModbusRtu_LastRxTick(void)
+{
+  return g_modbus.rx_buf.last_rx_tick;
+}
+
+void ModbusRtu_MarkActivity(void)
+{
+  g_modbus.rx_buf.last_rx_tick = HAL_GetTick();
+}

@@ -304,27 +304,34 @@ function configRow(ch) {
 function refreshPairStates() {
   $$(".config-row[data-ch]").forEach((row) => {
     row.classList.remove("disabled");
+    row.style.opacity = "";
+    row.removeAttribute("aria-disabled");
     row.querySelectorAll("input, select").forEach((el) => { el.disabled = false; });
+    row.querySelector(".cfg-input-label").textContent = `AIN${row.dataset.ch}/AVSS`;
   });
+
+  const occupied = new Set();
   for (let ch = 0; ch < 16; ch++) {
     const row = $(`.config-row[data-ch="${ch}"]`);
-    if (row.classList.contains("disabled")) continue;
     const mode = row.querySelector(".cfg-mode").value;
     const label = row.querySelector(".cfg-input-label");
     if (mode === "1") {
       const pair = ch % 2 === 0 ? ch + 1 : ch - 1;
-      const pairRow = $(`.config-row[data-ch="${pair}"]`);
       label.textContent = `AIN${ch}/AIN${pair}`;
-      if (pairRow) {
-        pairRow.classList.add("disabled");
-        pairRow.querySelector(".cfg-ch-enable").checked = false;
-        pairRow.querySelector(".cfg-mode").value = "0";
-        pairRow.querySelectorAll("input, select").forEach((el) => { el.disabled = true; });
-      }
-    } else {
-      label.textContent = `AIN${ch}/AVSS`;
+      occupied.add(pair);
     }
   }
+
+  occupied.forEach((ch) => {
+    const row = $(`.config-row[data-ch="${ch}"]`);
+    if (!row) return;
+    row.classList.add("disabled");
+    row.setAttribute("aria-disabled", "true");
+    row.querySelector(".cfg-ch-enable").checked = false;
+    row.querySelector(".cfg-mode").value = "0";
+    row.querySelector(".cfg-input-label").textContent = "被差分占用";
+    row.querySelectorAll("input, select").forEach((el) => { el.disabled = true; });
+  });
 }
 
 async function readConfig() {

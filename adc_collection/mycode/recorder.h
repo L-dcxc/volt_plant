@@ -22,6 +22,7 @@ extern "C" {
 void Recorder_Init(const AppConfigImage *config);
 void Recorder_OnChannelSample(uint8_t channel, int32_t voltage_uv);
 void Recorder_OnScanComplete(void);
+uint8_t Recorder_Flush(void);
 void Recorder_ResetTiming(void);
 uint8_t Recorder_GetSdOk(void);
 

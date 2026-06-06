@@ -44,6 +44,8 @@ void ModbusRtu_Init(UART_HandleTypeDef *huart, uint8_t slave_addr, const ModbusC
 
 /* Poll for frame reception and processing (call in main loop) */
 void ModbusRtu_Poll(void);
+uint32_t ModbusRtu_LastRxTick(void);
+void ModbusRtu_MarkActivity(void);
 
 /* RX callback (call from USART IRQ handler) */
 void ModbusRtu_RxCallback(uint8_t byte);

@@ -60,8 +60,8 @@ extern RTC_HandleTypeDef hrtc;
 extern DMA_HandleTypeDef hdma_sdmmc1_rx;
 extern DMA_HandleTypeDef hdma_sdmmc1_tx;
 extern SD_HandleTypeDef hsd1;
-/* USER CODE BEGIN EV */
 extern UART_HandleTypeDef huart1;
+/* USER CODE BEGIN EV */
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -217,6 +217,54 @@ void RTC_WKUP_IRQHandler(void)
 }
 
 /**
+  * @brief This function handles USART1 global interrupt.
+  */
+void USART1_IRQHandler(void)
+{
+  /* USER CODE BEGIN USART1_IRQn 0 */
+  uint32_t isrflags = READ_REG(huart1.Instance->ISR);
+  uint32_t cr1its = READ_REG(huart1.Instance->CR1);
+  uint32_t cr3its = READ_REG(huart1.Instance->CR3);
+
+  if (((isrflags & USART_ISR_WUF) != 0U) && ((cr3its & USART_CR3_WUFIE) != 0U))
+  {
+    __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_WUF);
+    ModbusRtu_MarkActivity();
+  }
+
+  if ((isrflags & USART_ISR_ORE) != 0U)
+  {
+    __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_OREF);
+  }
+
+  if (((isrflags & USART_ISR_RXNE) != 0U) && ((cr1its & USART_CR1_RXNEIE) != 0U))
+  {
+    uint8_t byte = (uint8_t)(huart1.Instance->RDR & 0xFFU);
+    ModbusRtu_RxCallback(byte);
+  }
+
+  return;
+  /* USER CODE END USART1_IRQn 0 */
+  /* USER CODE BEGIN USART1_IRQn 1 */
+
+  /* USER CODE END USART1_IRQn 1 */
+}
+
+/**
+  * @brief This function handles EXTI line[15:10] interrupts.
+  */
+void EXTI15_10_IRQHandler(void)
+{
+  /* USER CODE BEGIN EXTI15_10_IRQn 0 */
+
+  /* USER CODE END EXTI15_10_IRQn 0 */
+  HAL_GPIO_EXTI_IRQHandler(KEY0_Pin);
+  /* USER CODE BEGIN EXTI15_10_IRQn 1 */
+
+  /* USER CODE END EXTI15_10_IRQn 1 */
+}
+
+/**
   * @brief This function handles SDMMC1 global interrupt.
   */
 void SDMMC1_IRQHandler(void)
@@ -259,32 +307,5 @@ void DMA2_Channel5_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
-
-/**
-  * @brief This function handles USART1 global interrupt.
-  */
-void USART1_IRQHandler(void)
-{
-  uint32_t isrflags = READ_REG(huart1.Instance->ISR);
-  uint32_t cr1its = READ_REG(huart1.Instance->CR1);
-
-  /* Clear overrun error if present (prevents RX stall) */
-  if ((isrflags & USART_ISR_ORE) != 0U)
-  {
-    __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_OREF);
-  }
-
-  /* RXNE interrupt: receive data register not empty */
-  if (((isrflags & USART_ISR_RXNE) != 0U) && ((cr1its & USART_CR1_RXNEIE) != 0U))
-  {
-    /* Read data register (clears RXNE flag) */
-    uint8_t byte = (uint8_t)(huart1.Instance->RDR & 0xFFU);
-    ModbusRtu_RxCallback(byte);
-  }
-
-  /* Note: We don't call HAL_UART_IRQHandler because we're not using HAL's
-     interrupt-driven transfer machinery (no HAL_UART_Receive_IT started).
-     This handler is self-contained and only manages Modbus RX. */
-}
 
 /* USER CODE END 1 */
