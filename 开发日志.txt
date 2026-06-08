@@ -61,4 +61,6 @@ AD7124-8 SPI 通信测试通过：ID register read back: 0x17，设备高半字�
 睡眠时间可拉长--睡眠唤醒bug待修复
 
 6/8
-睡眠唤醒bug修复
+睡眠唤醒bug修复---RTC偏移测试？
+说明书编写
+exe生成
