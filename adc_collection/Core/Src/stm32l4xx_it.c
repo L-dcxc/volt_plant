@@ -222,29 +222,36 @@ void RTC_WKUP_IRQHandler(void)
 void USART1_IRQHandler(void)
 {
   /* USER CODE BEGIN USART1_IRQn 0 */
-  uint32_t isrflags = READ_REG(huart1.Instance->ISR);
-  uint32_t cr1its = READ_REG(huart1.Instance->CR1);
-  uint32_t cr3its = READ_REG(huart1.Instance->CR3);
+  static volatile uint8_t use_modbus_irq = 1U;
 
-  if (((isrflags & USART_ISR_WUF) != 0U) && ((cr3its & USART_CR3_WUFIE) != 0U))
+  if (use_modbus_irq != 0U)
   {
-    __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_WUF);
-    ModbusRtu_MarkActivity();
+    uint32_t isrflags = READ_REG(huart1.Instance->ISR);
+    uint32_t cr1its = READ_REG(huart1.Instance->CR1);
+    uint32_t cr3its = READ_REG(huart1.Instance->CR3);
+
+    if (((isrflags & USART_ISR_WUF) != 0U) && ((cr3its & USART_CR3_WUFIE) != 0U))
+    {
+      __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_WUF);
+      ModbusRtu_MarkActivity();
+    }
+
+    if ((isrflags & USART_ISR_ORE) != 0U)
+    {
+      __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_OREF);
+    }
+
+    if (((isrflags & USART_ISR_RXNE) != 0U) && ((cr1its & USART_CR1_RXNEIE) != 0U))
+    {
+      uint8_t byte = (uint8_t)(huart1.Instance->RDR & 0xFFU);
+      ModbusRtu_RxCallback(byte);
+    }
+
+    return;
   }
 
-  if ((isrflags & USART_ISR_ORE) != 0U)
-  {
-    __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_OREF);
-  }
-
-  if (((isrflags & USART_ISR_RXNE) != 0U) && ((cr1its & USART_CR1_RXNEIE) != 0U))
-  {
-    uint8_t byte = (uint8_t)(huart1.Instance->RDR & 0xFFU);
-    ModbusRtu_RxCallback(byte);
-  }
-
-  return;
   /* USER CODE END USART1_IRQn 0 */
+  HAL_UART_IRQHandler(&huart1);
   /* USER CODE BEGIN USART1_IRQn 1 */
 
   /* USER CODE END USART1_IRQn 1 */

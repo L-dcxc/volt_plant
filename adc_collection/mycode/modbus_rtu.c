@@ -349,6 +349,30 @@ void ModbusRtu_ResumeRx(void)
   __HAL_UART_ENABLE_IT(g_modbus.huart, UART_IT_RXNE);
 }
 
+void ModbusRtu_ResetRx(void)
+{
+  if (g_modbus.huart == NULL)
+    return;
+
+  __HAL_UART_DISABLE_IT(g_modbus.huart, UART_IT_RXNE);
+  __HAL_UART_CLEAR_FEFLAG(g_modbus.huart);
+  __HAL_UART_CLEAR_NEFLAG(g_modbus.huart);
+  __HAL_UART_CLEAR_OREFLAG(g_modbus.huart);
+  __HAL_UART_CLEAR_IDLEFLAG(g_modbus.huart);
+  if (__HAL_UART_GET_FLAG(g_modbus.huart, UART_FLAG_RXNE))
+  {
+    (void)g_modbus.huart->Instance->RDR;
+  }
+
+  g_modbus.rx_buf.head = 0U;
+  g_modbus.rx_buf.tail = 0U;
+  g_modbus.frame_len = 0U;
+
+  __HAL_UART_ENABLE_IT(g_modbus.huart, UART_IT_RXNE);
+  HAL_NVIC_SetPriority(USART1_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(USART1_IRQn);
+}
+
 /* Poll for frame reception and processing */
 void ModbusRtu_Poll(void)
 {

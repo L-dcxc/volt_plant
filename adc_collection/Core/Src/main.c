@@ -103,6 +103,7 @@ void SystemClock_Config(void);
 void PeriphCommonClock_Config(void);
 /* USER CODE BEGIN PFP */
 static void AppUart1_EnableStopWakeup(void);
+static void AppUart1_RecoverAfterStop(void);
 
 /* USER CODE END PFP */
 
@@ -211,6 +212,11 @@ static void AppPower_PollShutdown(void)
   }
 }
 
+static void AppPower_HoldLatch(void)
+{
+  HAL_GPIO_WritePin(PWR_ON_GPIO_Port, PWR_ON_Pin, GPIO_PIN_SET);
+}
+
 static void AppUart1_EnableStopWakeup(void)
 {
   UART_WakeUpTypeDef wakeup_config = {0};
@@ -230,6 +236,26 @@ static void AppUart1_EnableStopWakeup(void)
   }
   __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_WUF);
   __HAL_UART_ENABLE_IT(&huart1, UART_IT_WUF);
+}
+
+static void AppUart1_RecoverAfterStop(void)
+{
+  __HAL_UART_DISABLE_IT(&huart1, UART_IT_RXNE);
+  __HAL_UART_DISABLE_IT(&huart1, UART_IT_WUF);
+  __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_WUF);
+  __HAL_UART_CLEAR_FEFLAG(&huart1);
+  __HAL_UART_CLEAR_NEFLAG(&huart1);
+  __HAL_UART_CLEAR_OREFLAG(&huart1);
+  __HAL_UART_CLEAR_IDLEFLAG(&huart1);
+  if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_RXNE))
+  {
+    (void)huart1.Instance->RDR;
+  }
+
+  (void)HAL_UART_DeInit(&huart1);
+  MX_USART1_UART_Init();
+  AppUart1_EnableStopWakeup();
+  ModbusRtu_ResetRx();
 }
 
 static uint8_t AppSamplingDueSoon(uint32_t now_tick)
@@ -405,6 +431,7 @@ static void AppEnterStop2Slice(uint32_t sleep_seconds)
     return;
   }
 
+  AppPower_HoldLatch();
   AppSetAllStatusLeds(GPIO_PIN_RESET);
 
   (void)HAL_RTCEx_DeactivateWakeUpTimer(&hrtc);
@@ -414,6 +441,7 @@ static void AppEnterStop2Slice(uint32_t sleep_seconds)
                                            RTC_WAKEUPCLOCK_CK_SPRE_16BITS);
   if (rtc_status != HAL_OK)
   {
+    AppPower_HoldLatch();
     HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
     return;
   }
@@ -422,11 +450,14 @@ static void AppEnterStop2Slice(uint32_t sleep_seconds)
   HAL_PWREx_EnterSTOP2Mode(PWR_STOPENTRY_WFI);
 
   SystemClock_Config();
+  PeriphCommonClock_Config();
+  AppPower_HoldLatch();
   HAL_ResumeTick();
   if (stop2_rtc_wakeup != 0U)
   {
     AppAdvanceHalTick(sleep_seconds * 1000UL);
   }
+  AppUart1_RecoverAfterStop();
   HAL_IWDG_Refresh(&hiwdg);
   (void)HAL_RTCEx_DeactivateWakeUpTimer(&hrtc);
 }
