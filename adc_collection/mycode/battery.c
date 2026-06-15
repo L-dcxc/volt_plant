@@ -81,6 +81,8 @@ uint8_t Battery_Update(void)
                              &raw_vref);
   if ((ok == 0U) || (raw_vref == 0U))
   {
+    LL_ADC_SetCommonPathInternalCh(common,
+        LL_ADC_GetCommonPathInternalCh(common) & ~LL_ADC_PATH_INTERNAL_VREFINT);
     return 0U;
   }
 
@@ -94,6 +96,8 @@ uint8_t Battery_Update(void)
   ok = Battery_SampleChannel(ADC_CHANNEL_1, ADC_SAMPLETIME_247CYCLES_5,
                              &raw_bat);
   Battery_EnableDivider(0U);
+  LL_ADC_SetCommonPathInternalCh(common,
+      LL_ADC_GetCommonPathInternalCh(common) & ~LL_ADC_PATH_INTERNAL_VREFINT);
   if (ok == 0U)
   {
     return 0U;

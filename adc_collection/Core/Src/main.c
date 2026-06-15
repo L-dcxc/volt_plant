@@ -261,7 +261,9 @@ static void AppAd7124_PowerOffForSleep(void)
 
 static void AppPeripherals_DeInitForStop(void)
 {
+  HAL_GPIO_WritePin(BAT_ADC_EN_GPIO_Port, BAT_ADC_EN_Pin, GPIO_PIN_RESET);
   (void)HAL_ADC_DeInit(&hadc1);
+  (void)HAL_UART_DeInit(&huart1);
   (void)HAL_UART_DeInit(&huart2);
   (void)HAL_UART_DeInit(&huart3);
   (void)HAL_TIM_Base_DeInit(&htim6);
@@ -271,6 +273,7 @@ static void AppPeripherals_DeInitForStop(void)
 static void AppPeripherals_ReInitAfterStop(void)
 {
   MX_ADC1_Init();
+  MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   MX_USART3_UART_Init();
   MX_TIM6_Init();
@@ -355,10 +358,8 @@ static void AppUart1_RecoverAfterStop(void)
     (void)huart1.Instance->RDR;
   }
 
-  (void)HAL_UART_DeInit(&huart1);
-  MX_USART1_UART_Init();
-  /* Stop-wake disabled (see init in main). Keep DeInit + Init so USART1
-     registers come back clean after STOP2, but don't re-arm start-bit wake. */
+  /* Stop-wake disabled (see init in main). USART1 is reinitialized by
+     AppPeripherals_ReInitAfterStop; only restore the Modbus RX gate here. */
   /* AppUart1_EnableStopWakeup(); */
   modbus_rx_armed = 0U;
   AppModbusRx_SetArmed((s_user_awake != 0U) ? 1U : 0U);
