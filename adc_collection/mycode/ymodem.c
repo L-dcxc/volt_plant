@@ -3,7 +3,10 @@
 #include <stdio.h>
 #include <string.h>
 #include "ff.h"
-#include "iwdg.h"
+
+/* IWDG removed from CubeMX. Stub legacy refresh calls so this file still
+   compiles; if IWDG comes back, delete this macro and re-include iwdg.h. */
+#define HAL_IWDG_Refresh(p) ((void)0)
 
 #define YM_SOH         0x01U
 #define YM_STX         0x02U
@@ -318,7 +321,7 @@ YModemResult YModem_SendFile(UART_HandleTypeDef *huart, const char *path,
     return YMODEM_OK;
   }
 
-  memset(payload, 0, sizeof(payload));
+  memset(payload, 0, YM_BLOCK_DATA);
   YModem_BuildPacket(0U, payload);
   yr = YModem_TxPacketWithAck(huart);
   if (yr != YMODEM_OK)

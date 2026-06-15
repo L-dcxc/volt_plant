@@ -41,6 +41,11 @@ static uint8_t  s_record_tick_inited = 0U;
 static uint32_t s_last_mount_attempt_tick = 0U;
 static uint8_t  s_sd_mounted = 0U;
 static uint8_t  s_sd_ok = 0U;
+/* Set whenever Recorder_FlushCachedLines actually wrote bytes to the card.
+   Drained by Recorder_TakeWroteSinceLast so the main loop can flash an
+   indicator LED without instrumenting every internal flush site. */
+static uint8_t  s_wrote_since_last = 0U;
+static uint8_t  s_write_error_since_last = 0U;
 static char     s_line_cache[RECORDER_CACHE_MAX_LINES][RECORDER_LINE_BUF_SIZE];
 static uint8_t  s_line_cache_count = 0U;
 
@@ -498,6 +503,11 @@ static FRESULT Recorder_FlushCachedLines(void)
   if (result == FR_OK)
   {
     Recorder_ClearLineCache();
+    s_wrote_since_last = 1U;
+  }
+  else
+  {
+    s_write_error_since_last = 1U;
   }
 
   return result;
@@ -686,6 +696,85 @@ uint8_t Recorder_Flush(void)
   }
 
   s_sd_ok = 0U;
+  return 0U;
+}
+
+uint8_t Recorder_HasPendingWrite(void)
+{
+  return (s_line_cache_count != 0U) ? 1U : 0U;
+}
+
+uint8_t Recorder_TakeWroteSinceLast(void)
+{
+  uint8_t value = s_wrote_since_last;
+  s_wrote_since_last = 0U;
+  return value;
+}
+
+uint8_t Recorder_TakeWriteErrorSinceLast(void)
+{
+  uint8_t value = s_write_error_since_last;
+  s_write_error_since_last = 0U;
+  return value;
+}
+
+void Recorder_InvalidateMount(void)
+{
+  s_sd_mounted = 0U;
+  /* Reset the retry throttle so Recorder_EnsureMounted will try immediately
+     on the next write attempt instead of waiting RECORDER_SD_RETRY_MS. */
+  s_last_mount_attempt_tick = 0U;
+}
+
+uint8_t Recorder_NextScanWillFlush(void)
+{
+  uint32_t interval_ms;
+  uint32_t elapsed;
+  uint8_t target_lines;
+
+  if (s_config == NULL || s_config->run_enable == 0U)
+  {
+    return 0U;
+  }
+
+  /* Already-cached lines waiting to be flushed → always write. */
+  if (s_line_cache_count != 0U)
+  {
+    return 1U;
+  }
+
+  /* This scan will queue one S-row; if that fills the cache target, the
+     queue path will flush it immediately. */
+  target_lines = Recorder_TargetCacheLines();
+  if (((uint32_t)s_line_cache_count + 1U) >= (uint32_t)target_lines)
+  {
+    return 1U;
+  }
+
+  /* Averaging enabled and the record interval is about to expire → A-row
+     will queue with force_flush. Use the same elapsed-vs-interval check as
+     OnScanComplete, but evaluated before the scan; sample_interval_sec
+     grace prevents a borderline tick from being missed. */
+  if (s_config->average_enable != 0U && s_record_tick_inited != 0U)
+  {
+    interval_ms = s_config->record_interval_sec * 1000UL;
+    if (interval_ms == 0UL)
+    {
+      interval_ms = 1000UL;
+    }
+    elapsed = HAL_GetTick() - s_last_record_tick;
+    if (elapsed >= interval_ms)
+    {
+      return 1U;
+    }
+    /* Cover the case where the upcoming scan itself crosses the boundary:
+       at scan-complete time, elapsed will be ~elapsed + sample_interval. */
+    if ((elapsed + (s_config->sample_interval_sec * 1000UL)) >= interval_ms)
+    {
+      return 1U;
+    }
+  }
+
   return 0U;
 }
 

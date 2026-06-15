@@ -8,7 +8,10 @@
 
 FRESULT Storage_Init(uint32_t power_delay_ms);
 void Storage_PowerOn(uint32_t power_delay_ms);
+void Storage_PowerOff(void);
 uint8_t Storage_IsPowerEnabled(void);
+void Storage_InvalidateMount(void);
+FRESULT Storage_EnsureReady(uint32_t power_delay_ms);
 FRESULT Storage_Mount(void);
 FRESULT Storage_AppendLine(const char *file_name, const char *line);
 FRESULT Storage_WriteTestCsv(void);

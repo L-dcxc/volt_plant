@@ -251,23 +251,29 @@ static void ProcessFrame(const uint8_t *frame, uint16_t frame_len)
   {
     if (fc == MODBUS_FC_WRITE_SINGLE_REGISTER)
     {
-      uint16_t reg_addr = ((uint16_t)frame[2] << 8) | frame[3];
-      uint16_t value = ((uint16_t)frame[4] << 8) | frame[5];
-      g_modbus.callbacks.write_single_reg(reg_addr, value);
+      if (frame_len == 8U)
+      {
+        uint16_t reg_addr = ((uint16_t)frame[2] << 8) | frame[3];
+        uint16_t value = ((uint16_t)frame[4] << 8) | frame[5];
+        g_modbus.callbacks.write_single_reg(reg_addr, value);
+      }
     }
     else if (fc == MODBUS_FC_WRITE_MULTIPLE_REGISTERS)
     {
-      uint16_t start_addr = ((uint16_t)frame[2] << 8) | frame[3];
-      uint16_t count = ((uint16_t)frame[4] << 8) | frame[5];
-      uint8_t byte_count = frame[6];
-      if (count > 0U && count <= 123U && byte_count == count * 2U && frame_len == (9U + byte_count))
+      if (frame_len >= 9U)
       {
-        uint16_t values[123];
-        for (uint16_t i = 0U; i < count; i++)
+        uint16_t start_addr = ((uint16_t)frame[2] << 8) | frame[3];
+        uint16_t count = ((uint16_t)frame[4] << 8) | frame[5];
+        uint8_t byte_count = frame[6];
+        if (count > 0U && count <= 123U && byte_count == count * 2U && frame_len == (9U + byte_count))
         {
-          values[i] = ((uint16_t)frame[7U + i * 2U] << 8) | frame[8U + i * 2U];
+          uint16_t values[123];
+          for (uint16_t i = 0U; i < count; i++)
+          {
+            values[i] = ((uint16_t)frame[7U + i * 2U] << 8) | frame[8U + i * 2U];
+          }
+          g_modbus.callbacks.write_multiple_regs(start_addr, count, values);
         }
-        g_modbus.callbacks.write_multiple_regs(start_addr, count, values);
       }
     }
     return; /* No response for broadcast */
@@ -407,4 +413,9 @@ uint32_t ModbusRtu_LastRxTick(void)
 void ModbusRtu_MarkActivity(void)
 {
   g_modbus.rx_buf.last_rx_tick = HAL_GetTick();
+}
+
+void ModbusRtu_SetLastRxTick(uint32_t value)
+{
+  g_modbus.rx_buf.last_rx_tick = value;
 }

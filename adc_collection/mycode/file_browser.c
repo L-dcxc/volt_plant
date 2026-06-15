@@ -2,6 +2,9 @@
 
 #include <string.h>
 #include "fatfs.h"
+#include "storage.h"
+
+#define FILE_BROWSER_SD_POWER_DELAY_MS 1000U
 
 static FileBrowserEntry s_entries[FILE_BROWSER_MAX_ENTRIES];
 static uint16_t s_count = 0U;
@@ -62,9 +65,16 @@ FRESULT FileBrowser_OpenDir(void)
   s_count = 0U;
   s_selected = FILE_BROWSER_NO_SELECTION;
 
+  fr = Storage_EnsureReady(FILE_BROWSER_SD_POWER_DELAY_MS);
+  if (fr != FR_OK)
+  {
+    return fr;
+  }
+
   fr = f_opendir(&dir, SDPath);
   if (fr != FR_OK)
   {
+    Storage_InvalidateMount();
     return fr;
   }
 
@@ -74,6 +84,7 @@ FRESULT FileBrowser_OpenDir(void)
     if (fr != FR_OK)
     {
       (void)f_closedir(&dir);
+      Storage_InvalidateMount();
       return fr;
     }
     if (fno.fname[0] == '\0')
@@ -150,6 +161,12 @@ FRESULT FileBrowser_DeleteSelected(void)
   if (e == NULL)
   {
     return FR_INVALID_PARAMETER;
+  }
+
+  fr = Storage_EnsureReady(FILE_BROWSER_SD_POWER_DELAY_MS);
+  if (fr != FR_OK)
+  {
+    return fr;
   }
 
   FileBrowser_BuildPath(path, sizeof(path), e->name);

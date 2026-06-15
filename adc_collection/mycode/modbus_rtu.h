@@ -46,6 +46,9 @@ void ModbusRtu_Init(UART_HandleTypeDef *huart, uint8_t slave_addr, const ModbusC
 void ModbusRtu_Poll(void);
 uint32_t ModbusRtu_LastRxTick(void);
 void ModbusRtu_MarkActivity(void);
+/* Override the last-rx tick directly. Use to push the serial-active window
+   into the past (force-sleep) without waiting for it to time out. */
+void ModbusRtu_SetLastRxTick(uint32_t value);
 void ModbusRtu_ResetRx(void);
 
 /* RX callback (call from USART IRQ handler) */

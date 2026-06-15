@@ -232,8 +232,12 @@ void USART1_IRQHandler(void)
 
     if (((isrflags & USART_ISR_WUF) != 0U) && ((cr3its & USART_CR3_WUFIE) != 0U))
     {
+      /* Just clear the wake flag. Do NOT mark serial activity here — a
+         spurious start-bit (PA10 noise / floating line while running on
+         battery) sets WUF too, and treating that as "host talked to us"
+         keeps the device awake 60 s and makes the LED flash for no reason.
+         Only RXNE with a valid frame should count as activity. */
       __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_WUF);
-      ModbusRtu_MarkActivity();
     }
 
     if ((isrflags & USART_ISR_ORE) != 0U)
@@ -243,8 +247,21 @@ void USART1_IRQHandler(void)
 
     if (((isrflags & USART_ISR_RXNE) != 0U) && ((cr1its & USART_CR1_RXNEIE) != 0U))
     {
-      uint8_t byte = (uint8_t)(huart1.Instance->RDR & 0xFFU);
-      ModbusRtu_RxCallback(byte);
+      /* Framing-error / noise-error bytes are garbage: drain RDR to clear
+         RXNE and the error flag, but don't feed it to Modbus. The valid-byte
+         path is the only thing that should update Modbus rx_buf.last_rx_tick
+         (via ModbusRtu_RxCallback -> RingBuf_Write). */
+      if ((isrflags & (USART_ISR_FE | USART_ISR_NE)) != 0U)
+      {
+        __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_FEF);
+        __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_NEF);
+        (void)huart1.Instance->RDR;
+      }
+      else
+      {
+        uint8_t byte = (uint8_t)(huart1.Instance->RDR & 0xFFU);
+        ModbusRtu_RxCallback(byte);
+      }
     }
 
     return;

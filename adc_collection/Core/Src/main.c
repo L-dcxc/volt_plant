@@ -22,7 +22,6 @@
 #include "dma.h"
 #include "fatfs.h"
 #include "i2c.h"
-#include "iwdg.h"
 #include "rtc.h"
 #include "sdmmc.h"
 #include "spi.h"
@@ -57,11 +56,21 @@
 #define APP_POWER_ON_CHECK_PERIOD_MS 10U
 #define APP_POWER_OFF_HOLD_TIME_MS 3000U
 #define APP_IDLE_SLEEP_MIN_MS 20U
-#define APP_SERIAL_ACTIVE_HOLD_MS 60000U
+#define APP_SERIAL_ACTIVE_HOLD_MS 5000U
 #define APP_KEY0_HOLD_TIME_MS 2000U
-#define APP_KEY0_ACTIVE_HOLD_MS 60000U
 #define APP_SLEEP_LED_FLASH_MS 120U
-#define APP_STOP2_MAX_SLEEP_SECONDS 5U
+#define APP_STOP2_MAX_SLEEP_SECONDS 30U
+#define APP_BOOT_AWAKE_HOLD_MS 10000U
+#define APP_ADC_POWER_SETTLE_MS 500U
+#define APP_AD7124_SAMPLE_TIMEOUT_MS 500U
+#define APP_SD_POWER_SETTLE_MS 1000U
+#define APP_SD_WRITE_LED_MS 700U
+#define APP_ERROR_LED_MS 700U
+
+/* IWDG removed from CubeMX. Stub the refresh sites so legacy calls compile
+   as no-ops; remove this define if IWDG is re-enabled. The macro skips
+   evaluation of the argument so a missing hiwdg symbol doesn't error. */
+#define HAL_IWDG_Refresh(p) ((void)0)
 
 /* USER CODE END PD */
 
@@ -82,14 +91,32 @@ static uint8_t storage_boot_test_enable = 1U;
 static uint32_t ad7124_print_tick = 0U;
 static uint32_t led_blink_tick = 0U;
 static uint8_t modbus_enabled = 1U;
+static uint8_t modbus_rx_armed = 0U;
 static uint8_t eeprom_ok = 0U;
 static uint8_t rtc_ok = 0U;
 static uint8_t sd_ok = 0U;
+static uint8_t adc_powered = 0U;
 static uint32_t sample_tick = 0U;
 static uint8_t prev_run_enable = 0U;
 static uint32_t battery_tick = 0U;
-static uint32_t key0_active_until_tick = 0U;
+/* User-toggled awake mode: 1 = stay awake (run continuously), 0 = sleep when
+   nothing else needs the CPU. Set to 1 by a wake-up press from STOP2,
+   cleared by a long-press (>= APP_KEY0_HOLD_TIME_MS) while awake. */
+static uint8_t s_user_awake = 0U;
+static uint8_t key0_press_active = 0U;
+static uint32_t key0_press_start_tick = 0U;
+static uint8_t key0_long_press_handled = 0U;
+/* Set when EXTI wakes the CPU from STOP2 so AppKey0_PollModeToggle ignores
+   the press that just woke us (otherwise that same press could immediately
+   satisfy the 2 s long-press and put us right back to sleep). */
+static uint8_t key0_wakeup_consume = 0U;
 static uint8_t idle_sleep_state = 0U;
+/* Boot-time visible awake window: forces the device to stay awake (with the
+   green LED blinking) for the first APP_BOOT_AWAKE_HOLD_MS after init so the
+   user can see the board powered up successfully before it drops into STOP2.
+   Held by AppMaybeSleepIdle and seeded by main right before the loop. */
+static uint8_t  boot_hold_active = 0U;
+static uint32_t boot_hold_started_tick = 0U;
 static uint8_t led_notice_active = 0U;
 static uint8_t led_notice_phase = 0U;
 static uint32_t led_notice_tick = 0U;
@@ -104,6 +131,19 @@ void PeriphCommonClock_Config(void);
 /* USER CODE BEGIN PFP */
 static void AppUart1_EnableStopWakeup(void);
 static void AppUart1_RecoverAfterStop(void);
+static void AppModbusRx_SetArmed(uint8_t armed);
+static HAL_StatusTypeDef AppAd7124_EnsureReady(void);
+static void AppAd7124_PowerOffForSleep(void);
+static void AppPeripherals_DeInitForStop(void);
+static void AppPeripherals_ReInitAfterStop(void);
+static void AppBlinkAdcError(void);
+static void AppBlinkStorageError(void);
+/* Silence ARMCC "declared but never referenced" for the wake-up helper while
+   it stays parked behind comments in main(). Switch back to a plain extern
+   the moment AppUart1_EnableStopWakeup is called again. */
+#ifdef __ARMCC_VERSION
+#pragma diag_suppress 177
+#endif
 
 /* USER CODE END PFP */
 
@@ -167,11 +207,74 @@ static uint8_t AppPower_CheckOnOffLowAndLatch(void)
    Returns 0 on success, 1 on failure (becomes a Modbus exception). */
 static uint8_t AppModbus_ReconfigureAd7124(void)
 {
-  if (ad7124_ready == 0U)
+  if (AppAd7124_EnsureReady() != HAL_OK)
   {
     return 1U;
   }
   return (AD7124_ApplyConfig(&had7124, &app_config) == HAL_OK) ? 0U : 1U;
+}
+
+static HAL_StatusTypeDef AppAd7124_EnsureReady(void)
+{
+  HAL_StatusTypeDef st;
+  uint8_t id = 0U;
+
+  if ((adc_powered != 0U) && (ad7124_ready != 0U))
+  {
+    return HAL_OK;
+  }
+
+  AD7124_BoardPowerOn(APP_ADC_POWER_SETTLE_MS);
+  adc_powered = 1U;
+  MX_SPI1_Init();
+
+  st = AD7124_Init(&had7124, &hspi1);
+  if (st != HAL_OK)
+  {
+    ad7124_ready = 0U;
+    return st;
+  }
+
+  st = AD7124_ReadID(&had7124, &id);
+  if ((st != HAL_OK) || (AD7124_IsDeviceID(id) == 0U))
+  {
+    ad7124_ready = 0U;
+    return (st == HAL_OK) ? HAL_ERROR : st;
+  }
+
+  st = AD7124_ApplyConfig(&had7124, &app_config);
+  ad7124_ready = (st == HAL_OK) ? 1U : 0U;
+  return st;
+}
+
+static void AppAd7124_PowerOffForSleep(void)
+{
+  if (adc_powered == 0U)
+  {
+    return;
+  }
+
+  (void)HAL_SPI_DeInit(&hspi1);
+  AD7124_BoardPowerOff();
+  adc_powered = 0U;
+}
+
+static void AppPeripherals_DeInitForStop(void)
+{
+  (void)HAL_ADC_DeInit(&hadc1);
+  (void)HAL_UART_DeInit(&huart2);
+  (void)HAL_UART_DeInit(&huart3);
+  (void)HAL_TIM_Base_DeInit(&htim6);
+  (void)HAL_TIM_Base_DeInit(&htim7);
+}
+
+static void AppPeripherals_ReInitAfterStop(void)
+{
+  MX_ADC1_Init();
+  MX_USART2_UART_Init();
+  MX_USART3_UART_Init();
+  MX_TIM6_Init();
+  MX_TIM7_Init();
 }
 
 /* Non-blocking long-press shutdown detector. Call once per main-loop
@@ -254,8 +357,38 @@ static void AppUart1_RecoverAfterStop(void)
 
   (void)HAL_UART_DeInit(&huart1);
   MX_USART1_UART_Init();
-  AppUart1_EnableStopWakeup();
-  ModbusRtu_ResetRx();
+  /* Stop-wake disabled (see init in main). Keep DeInit + Init so USART1
+     registers come back clean after STOP2, but don't re-arm start-bit wake. */
+  /* AppUart1_EnableStopWakeup(); */
+  modbus_rx_armed = 0U;
+  AppModbusRx_SetArmed((s_user_awake != 0U) ? 1U : 0U);
+}
+
+static void AppModbusRx_SetArmed(uint8_t armed)
+{
+  if (modbus_enabled == 0U)
+  {
+    return;
+  }
+
+  if (armed != 0U)
+  {
+    if (modbus_rx_armed == 0U)
+    {
+      ModbusRtu_ResetRx();
+      ModbusRtu_SetLastRxTick(0U);
+      modbus_rx_armed = 1U;
+    }
+  }
+  else
+  {
+    if (modbus_rx_armed != 0U)
+    {
+      ModbusRtu_PauseRx();
+      ModbusRtu_SetLastRxTick(0U);
+      modbus_rx_armed = 0U;
+    }
+  }
 }
 
 static uint8_t AppSamplingDueSoon(uint32_t now_tick)
@@ -329,28 +462,24 @@ static uint32_t AppNextStop2SleepSeconds(uint32_t now_tick)
 
 static uint8_t AppSerialRecentlyActive(uint32_t now_tick)
 {
+  uint32_t last;
+
   if (modbus_enabled == 0U)
   {
     return 0U;
   }
 
-  return ((now_tick - ModbusRtu_LastRxTick()) <= APP_SERIAL_ACTIVE_HOLD_MS) ? 1U : 0U;
-}
-
-static uint8_t AppKey0ActiveWindow(uint32_t now_tick)
-{
-  if (key0_active_until_tick == 0U)
+  /* Reject the "no RX ever" case: last_rx_tick is 0 until the very first
+     byte arrives. Without this guard, AppSerialRecentlyActive returns true
+     for the first 60 seconds after every boot — the device refuses to sleep
+     even though nothing has talked to it. */
+  last = ModbusRtu_LastRxTick();
+  if (last == 0U)
   {
     return 0U;
   }
 
-  if ((int32_t)(key0_active_until_tick - now_tick) > 0)
-  {
-    return 1U;
-  }
-
-  key0_active_until_tick = 0U;
-  return 0U;
+  return ((now_tick - last) <= APP_SERIAL_ACTIVE_HOLD_MS) ? 1U : 0U;
 }
 
 static void AppSetAllStatusLeds(GPIO_PinState state)
@@ -358,6 +487,29 @@ static void AppSetAllStatusLeds(GPIO_PinState state)
   HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, state);
   HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, state);
   HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, state);
+}
+
+/* Visible yellow blink after an SD write commits. This intentionally costs a
+   little awake time so the user can actually see the storage heartbeat. */
+static void AppBlinkSdWrite(void)
+{
+  HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, GPIO_PIN_SET);
+  HAL_Delay(APP_SD_WRITE_LED_MS);
+  HAL_GPIO_WritePin(LED_YELLOW_GPIO_Port, LED_YELLOW_Pin, GPIO_PIN_RESET);
+}
+
+static void AppBlinkAdcError(void)
+{
+  HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
+  HAL_Delay(APP_ERROR_LED_MS);
+  HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
+}
+
+static void AppBlinkStorageError(void)
+{
+  HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
+  HAL_Delay(APP_ERROR_LED_MS);
+  HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
 }
 
 static void AppLedNoticeStart(void)
@@ -412,11 +564,24 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == KEY0_Pin)
   {
-    key0_active_until_tick = HAL_GetTick() + APP_KEY0_ACTIVE_HOLD_MS;
-    led_blink_tick = 0U;
+    /* Spurious-EXTI guard: re-read the line. Any noise-induced pulse will
+       already be gone by the time we get here (Cortex-M4 IRQ entry latency
+       ~12 cycles + HAL prologue). A real press holds the line low for ms. */
+    if (HAL_GPIO_ReadPin(KEY0_GPIO_Port, KEY0_Pin) != GPIO_PIN_RESET)
+    {
+      return;
+    }
+
+    /* Wake-up press: if we were idle-sleeping (already in STOP2 or about to
+       enter), flip into user-awake mode and let the press that triggered the
+       wake-up be consumed (don't let AppKey0_PollModeToggle interpret it as a
+       long-press to go back to sleep). */
     if (idle_sleep_state != 0U)
     {
+      s_user_awake = 1U;
       idle_sleep_state = 0U;
+      led_blink_tick = 0U;
+      key0_wakeup_consume = 1U;
       AppLedNoticeStart();
     }
   }
@@ -433,6 +598,22 @@ static void AppEnterStop2Slice(uint32_t sleep_seconds)
 
   AppPower_HoldLatch();
   AppSetAllStatusLeds(GPIO_PIN_RESET);
+
+  /* Keep SD powered/mounted across STOP2 for now. Power-cycling the card after
+     every sample made the boot self-test pass but runtime recorder and file
+     browser mounts fail on some cards. Once runtime writes are stable, SD
+     power-down can be reintroduced behind a measured retry path. */
+  AppAd7124_PowerOffForSleep();
+  AppModbusRx_SetArmed(0U);
+  AppPeripherals_DeInitForStop();
+
+  /* Clear any stale EXTI pending bit for KEY0 before entering STOP2. If a
+     glitch already latched a pending interrupt on PB15 (line 15), wake-up
+     would re-enter HAL_GPIO_EXTI_Callback immediately and look like a real
+     press. We also clear the NVIC pending so a queued interrupt from before
+     the last loop iteration doesn't fire spuriously on resume. */
+  __HAL_GPIO_EXTI_CLEAR_IT(KEY0_Pin);
+  HAL_NVIC_ClearPendingIRQ(EXTI15_10_IRQn);
 
   (void)HAL_RTCEx_DeactivateWakeUpTimer(&hrtc);
   stop2_rtc_wakeup = 0U;
@@ -457,38 +638,52 @@ static void AppEnterStop2Slice(uint32_t sleep_seconds)
   {
     AppAdvanceHalTick(sleep_seconds * 1000UL);
   }
+  AppPeripherals_ReInitAfterStop();
   AppUart1_RecoverAfterStop();
+  Storage_InvalidateMount();
+  Recorder_InvalidateMount();
   HAL_IWDG_Refresh(&hiwdg);
   (void)HAL_RTCEx_DeactivateWakeUpTimer(&hrtc);
 }
 
 static void AppKey0_PollModeToggle(void)
 {
-  static uint8_t press_active = 0U;
-  static uint8_t toggled_this_press = 0U;
-  static uint32_t press_start_tick = 0U;
-
   if (HAL_GPIO_ReadPin(KEY0_GPIO_Port, KEY0_Pin) == GPIO_PIN_RESET)
   {
-    if (press_active == 0U)
+    /* The press that woke us from STOP2 is consumed: don't start the long-press
+       counter until the user lifts the key, so a wake press of any duration
+       just brings us to user-awake mode without bouncing back to sleep. */
+    if (key0_wakeup_consume != 0U)
     {
-      press_active = 1U;
-      toggled_this_press = 0U;
-      press_start_tick = HAL_GetTick();
+      return;
     }
-    else if ((toggled_this_press == 0U) &&
-             ((HAL_GetTick() - press_start_tick) >= APP_KEY0_HOLD_TIME_MS))
+
+    if (key0_press_active == 0U)
     {
-      key0_active_until_tick = HAL_GetTick() + APP_KEY0_ACTIVE_HOLD_MS;
-      toggled_this_press = 1U;
+      key0_press_active = 1U;
+      key0_press_start_tick = HAL_GetTick();
+      key0_long_press_handled = 0U;
+    }
+    else if ((key0_long_press_handled == 0U) &&
+             ((HAL_GetTick() - key0_press_start_tick) >= APP_KEY0_HOLD_TIME_MS))
+    {
+      /* Long-press: force the device to sleep. Works in any awake state —
+         user-awake mode, post-RTC scan, or any time the host-serial window
+         is keeping us up. Push last_rx_tick well into the past so
+         AppSerialRecentlyActive returns 0 on the next iteration. */
+      s_user_awake = 0U;
+      ModbusRtu_SetLastRxTick(HAL_GetTick() - APP_SERIAL_ACTIVE_HOLD_MS - 1000U);
+      key0_long_press_handled = 1U;
       led_blink_tick = 0U;
       AppLedNoticeStart();
     }
   }
   else
   {
-    press_active = 0U;
-    toggled_this_press = 0U;
+    /* Key released: clear all per-press state so the next press is fresh. */
+    key0_press_active = 0U;
+    key0_long_press_handled = 0U;
+    key0_wakeup_consume = 0U;
   }
 }
 
@@ -496,7 +691,25 @@ static void AppMaybeSleepIdle(void)
 {
   uint32_t sleep_seconds;
 
-  if (AppKey0ActiveWindow(HAL_GetTick()) != 0U)
+  /* Boot-time visible-alive window. Treat exactly like user-awake mode:
+     refuse to enter STOP2 until APP_BOOT_AWAKE_HOLD_MS has elapsed since the
+     window was armed. Auto-clears so subsequent idle cycles can sleep. */
+  if (boot_hold_active != 0U)
+  {
+    if ((HAL_GetTick() - boot_hold_started_tick) < APP_BOOT_AWAKE_HOLD_MS)
+    {
+      if (idle_sleep_state != 0U)
+      {
+        idle_sleep_state = 0U;
+      }
+      return;
+    }
+    boot_hold_active = 0U;
+  }
+
+  /* User explicitly requested awake mode (short-press wake from STOP2). Stay
+     awake until the user long-presses to release it. */
+  if (s_user_awake != 0U)
   {
     if (idle_sleep_state != 0U)
     {
@@ -582,7 +795,6 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
-  MX_IWDG_Init();
   MX_SDMMC1_SD_Init();
   MX_ADC1_Init();
   MX_I2C2_Init();
@@ -595,7 +807,19 @@ int main(void)
   MX_FATFS_Init();
   MX_RTC_Init();
   /* USER CODE BEGIN 2 */
-  AppUart1_EnableStopWakeup();
+  /* IWDG fully removed from CubeMX. All HAL_IWDG_Refresh(&hiwdg) calls are
+     stubbed to no-ops via the macro in USER CODE BEGIN PD. */
+  /* Clear stale reset flags so a future debug session starts from a clean
+     RCC_CSR. The boot-cause printf and the [ZZZ]/[WAKE] traces were
+     temporary diagnostics — removed now that the sleep state machine is
+     stable. */
+  __HAL_RCC_CLEAR_RESET_FLAGS();
+  /* USART1 start-bit wake-up disabled: PA10 floats while running on battery
+     (no USB driver pulling it high) and the resulting noise triggers spurious
+     wake-ups. The device now only wakes from STOP2 via RTC (scheduled
+     sampling) or KEY0 EXTI (user press). Re-enable by uncommenting the line
+     below if a host-initiated wake path is needed later. */
+  /* AppUart1_EnableStopWakeup(); */
   {
     uint8_t power_latched;
 
@@ -605,6 +829,7 @@ int main(void)
   power_latched = AppPower_CheckOnOffLowAndLatch();
   (void)power_latched;
   AD7124_BoardPowerOn(500U);
+  adc_powered = 1U;
 
   /* printf("OPEN is OK!!!\r\n"); */
   /* if (power_latched != 0U)
@@ -792,7 +1017,7 @@ int main(void)
      already ran, power is on; otherwise turn it on now. */
   if (Storage_IsPowerEnabled() == 0U)
   {
-    Storage_PowerOn(500U);
+    Storage_PowerOn(APP_SD_POWER_SETTLE_MS);
   }
   sd_ok = (Storage_Mount() == FR_OK) ? 1U : 0U;
 
@@ -817,10 +1042,19 @@ int main(void)
     AppModbus_Init(&app_config, &app_config_store);
     AppModbus_SetReconfigureCallback(AppModbus_ReconfigureAd7124);
     ModbusRtu_Init(&huart1, app_config.modbus_addr, &modbus_cb);
+    /* Boot directly into low-power mode: no post-boot 60 s serial window.
+       Host must wake the device first (KEY0 short press) before Modbus. */
     printf("[MODBUS] initialized on USART1, addr=%u, baud=%lu\r\n",
            (unsigned)app_config.modbus_addr,
            (unsigned long)app_config.uart_baudrate);
+    modbus_rx_armed = 1U;
   }
+
+  /* Arm the boot-time visible-alive window: keeps the device out of STOP2
+     and blinks the green LED for APP_BOOT_AWAKE_HOLD_MS so the user can see
+     the board booted successfully before it drops to its low-power cadence. */
+  boot_hold_active = 1U;
+  boot_hold_started_tick = HAL_GetTick();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -834,6 +1068,10 @@ int main(void)
     /* Long-press shutdown: hold ON_OFF low for 3s to cut power */
     AppPower_PollShutdown();
     AppKey0_PollModeToggle();
+    if ((boot_hold_active != 0U) || (s_user_awake != 0U))
+    {
+      AppModbusRx_SetArmed(1U);
+    }
     ControlOutputs_Poll();
 
     uint8_t notice_running = AppLedNoticePoll();
@@ -844,7 +1082,8 @@ int main(void)
     {
       /* Let the three-LED notice finish without heartbeat overriding it. */
     }
-    else if ((AppKey0ActiveWindow(HAL_GetTick()) != 0U) ||
+    else if ((boot_hold_active != 0U) ||
+             (s_user_awake != 0U) ||
              (AppSerialRecentlyActive(HAL_GetTick()) != 0U))
     {
       if ((HAL_GetTick() - led_blink_tick) >= 250U)
@@ -864,12 +1103,20 @@ int main(void)
     if ((app_config.run_enable != 0U) && (prev_run_enable == 0U))
     {
       sd_ok = Recorder_Flush();
+      if (Recorder_TakeWroteSinceLast() != 0U)
+      {
+        AppBlinkSdWrite();
+      }
       sample_tick = HAL_GetTick();
       Recorder_ResetTiming();
     }
     else if ((app_config.run_enable == 0U) && (prev_run_enable != 0U))
     {
       sd_ok = Recorder_Flush();
+      if (Recorder_TakeWroteSinceLast() != 0U)
+      {
+        AppBlinkSdWrite();
+      }
     }
     prev_run_enable = app_config.run_enable;
 
@@ -888,6 +1135,32 @@ int main(void)
         uint8_t round_idx;
         uint8_t enabled_count = 0U;
         uint8_t samples_read = 0U;
+        uint8_t need_sd = Recorder_NextScanWillFlush();
+        HAL_StatusTypeDef adc_wake_status;
+
+        /* If SD power was explicitly cut, bring it back before a scan that
+           will flush. For now the card is kept powered across STOP2 because
+           runtime writes/file browsing must be stable before reintroducing
+           SD power gating. */
+        if ((need_sd != 0U) && (Storage_IsPowerEnabled() == 0U))
+        {
+          Storage_PowerOn(APP_SD_POWER_SETTLE_MS);
+          /* InvalidateMount is called after STOP2 wake-up, so the next
+             write will re-mount via Recorder_EnsureMounted. */
+        }
+
+        adc_wake_status = AppAd7124_EnsureReady();
+        if (adc_wake_status != HAL_OK)
+        {
+          if (modbus_enabled != 0U)
+          {
+            AppModbus_UpdateSystemStatus(ad7124_ready, eeprom_ok, rtc_ok, sd_ok, app_config.run_enable);
+          }
+          AppBlinkAdcError();
+          sample_tick = HAL_GetTick();
+          AppMaybeSleepIdle();
+          continue;
+        }
 
         sample_tick = HAL_GetTick();
 
@@ -915,7 +1188,11 @@ int main(void)
 
           /* Per-channel timeout: AD7124 FILTER 当前固定 Sinc4 + FS=64
              (~300 SPS)，单通道 settling ~13ms，100ms 留 ~7× 余量。 */
-          sample_st = AD7124_ReadSample(&had7124, &raw_data, &signed_data, &sample_status, 100U);
+          sample_st = AD7124_ReadSample(&had7124,
+                                         &raw_data,
+                                         &signed_data,
+                                         &sample_status,
+                                         APP_AD7124_SAMPLE_TIMEOUT_MS);
           if (sample_st != HAL_OK)
           {
             break;
@@ -949,8 +1226,21 @@ int main(void)
           HAL_IWDG_Refresh(&hiwdg);
         }
 
+        if (samples_read == 0U)
+        {
+          AppBlinkAdcError();
+        }
+
         Recorder_OnScanComplete();
         sd_ok = Recorder_GetSdOk();
+        if (Recorder_TakeWroteSinceLast() != 0U)
+        {
+          AppBlinkSdWrite();
+        }
+        if (Recorder_TakeWriteErrorSinceLast() != 0U)
+        {
+          AppBlinkStorageError();
+        }
 
         if (modbus_enabled != 0U)
         {
@@ -1001,26 +1291,37 @@ int main(void)
       else
       {
         char file_path[FILE_BROWSER_NAME_SIZE + 8U];
+        FRESULT ready;
         YModemResult yr;
 
-        sd_ok = Recorder_Flush();
-        FileBrowser_BuildSelectedPath(file_path, sizeof(file_path));
-
-        /* ModbusRtu_PauseRx was already called inside WriteSingleRegister
-           when the FC06 START arrived, so RXNE has been masked since before
-           the ACK was sent. We only need to resume after YMODEM finishes. */
-        yr = YModem_SendFile(&huart1, file_path, entry->name);
-        ModbusRtu_ResumeRx();
-
-        if (yr == YMODEM_OK)
+        ready = Storage_EnsureReady(APP_SD_POWER_SETTLE_MS);
+        if (ready != FR_OK)
         {
-          AppModbus_FileXferSetState(4U, 0U);
+          sd_ok = 0U;
+          ModbusRtu_ResumeRx();
+          AppModbus_FileXferSetState(5U, 0x0004U);
         }
         else
         {
-          uint16_t err = (yr == YMODEM_FILE_OPEN_ERROR || yr == YMODEM_FILE_READ_ERROR)
-                             ? 0x0004U : 0x00FFU;
-          AppModbus_FileXferSetState(5U, err);
+          sd_ok = Recorder_Flush();
+          FileBrowser_BuildSelectedPath(file_path, sizeof(file_path));
+
+          /* ModbusRtu_PauseRx was already called inside WriteSingleRegister
+             when the FC06 START arrived, so RXNE has been masked since before
+             the ACK was sent. We only need to resume after YMODEM finishes. */
+          yr = YModem_SendFile(&huart1, file_path, entry->name);
+          ModbusRtu_ResumeRx();
+
+          if (yr == YMODEM_OK)
+          {
+            AppModbus_FileXferSetState(4U, 0U);
+          }
+          else
+          {
+            uint16_t err = (yr == YMODEM_FILE_OPEN_ERROR || yr == YMODEM_FILE_READ_ERROR)
+                               ? 0x0004U : 0x00FFU;
+            AppModbus_FileXferSetState(5U, err);
+          }
         }
       }
     }
@@ -1054,13 +1355,12 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_LSI
-                              |RCC_OSCILLATORTYPE_HSE|RCC_OSCILLATORTYPE_LSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSE
+                              |RCC_OSCILLATORTYPE_LSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.LSEState = RCC_LSE_ON;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 1;

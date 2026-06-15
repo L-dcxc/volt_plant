@@ -3,6 +3,8 @@
 #include "fatfs.h"
 #include "main.h"
 
+#define STORAGE_DEFAULT_POWER_DELAY_MS 1000U
+
 static uint8_t storage_mounted = 0U;
 
 static uint32_t Storage_StringLength(const char *text)
@@ -90,8 +92,21 @@ FRESULT Storage_Init(uint32_t power_delay_ms)
 
 void Storage_PowerOn(uint32_t power_delay_ms)
 {
+  if (HAL_GPIO_ReadPin(SD_PWR_EN_GPIO_Port, SD_PWR_EN_Pin) != GPIO_PIN_SET)
+  {
+    storage_mounted = 0U;
+  }
   HAL_GPIO_WritePin(SD_PWR_EN_GPIO_Port, SD_PWR_EN_Pin, GPIO_PIN_SET);
   HAL_Delay(power_delay_ms);
+}
+
+void Storage_PowerOff(void)
+{
+  /* Unmount before cutting power so FatFs releases its cached FATFS object;
+     next access must call Storage_Mount/Storage_Init again. */
+  (void)f_mount(NULL, (TCHAR const *)SDPath, 0U);
+  storage_mounted = 0U;
+  HAL_GPIO_WritePin(SD_PWR_EN_GPIO_Port, SD_PWR_EN_Pin, GPIO_PIN_RESET);
 }
 
 uint8_t Storage_IsPowerEnabled(void)
@@ -99,17 +114,38 @@ uint8_t Storage_IsPowerEnabled(void)
   return (HAL_GPIO_ReadPin(SD_PWR_EN_GPIO_Port, SD_PWR_EN_Pin) == GPIO_PIN_SET) ? 1U : 0U;
 }
 
+void Storage_InvalidateMount(void)
+{
+  storage_mounted = 0U;
+}
+
 FRESULT Storage_Mount(void)
 {
   FRESULT result;
 
-  result = f_mount(&SDFatFS, (TCHAR const *)SDPath, 1U);
-  if (result == FR_OK)
+  if (Storage_IsPowerEnabled() == 0U)
   {
-    storage_mounted = 1U;
+    Storage_PowerOn(STORAGE_DEFAULT_POWER_DELAY_MS);
   }
 
+  result = f_mount(&SDFatFS, (TCHAR const *)SDPath, 1U);
+  storage_mounted = (result == FR_OK) ? 1U : 0U;
   return result;
+}
+
+FRESULT Storage_EnsureReady(uint32_t power_delay_ms)
+{
+  if (Storage_IsPowerEnabled() == 0U)
+  {
+    Storage_PowerOn(power_delay_ms);
+  }
+
+  if (storage_mounted != 0U)
+  {
+    return FR_OK;
+  }
+
+  return Storage_Mount();
 }
 
 FRESULT Storage_AppendLine(const char *file_name, const char *line)
@@ -123,13 +159,10 @@ FRESULT Storage_AppendLine(const char *file_name, const char *line)
     return FR_INVALID_PARAMETER;
   }
 
-  if (storage_mounted == 0U)
+  result = Storage_EnsureReady(STORAGE_DEFAULT_POWER_DELAY_MS);
+  if (result != FR_OK)
   {
-    result = Storage_Mount();
-    if (result != FR_OK)
-    {
-      return result;
-    }
+    return result;
   }
 
   Storage_BuildPath(path, (uint32_t)sizeof(path), file_name);
@@ -137,6 +170,7 @@ FRESULT Storage_AppendLine(const char *file_name, const char *line)
   result = f_open(&file, path, FA_WRITE | FA_OPEN_APPEND);
   if (result != FR_OK)
   {
+    storage_mounted = 0U;
     return result;
   }
 
@@ -159,6 +193,11 @@ FRESULT Storage_AppendLine(const char *file_name, const char *line)
     }
   }
 
+  if (result != FR_OK)
+  {
+    storage_mounted = 0U;
+  }
+
   return result;
 }
 
@@ -168,13 +207,10 @@ FRESULT Storage_WriteTestCsv(void)
   FIL file;
   FRESULT result;
 
-  if (storage_mounted == 0U)
+  result = Storage_EnsureReady(STORAGE_DEFAULT_POWER_DELAY_MS);
+  if (result != FR_OK)
   {
-    result = Storage_Mount();
-    if (result != FR_OK)
-    {
-      return result;
-    }
+    return result;
   }
 
   Storage_BuildPath(path, (uint32_t)sizeof(path), STORAGE_TEST_FILE_NAME);
@@ -182,6 +218,7 @@ FRESULT Storage_WriteTestCsv(void)
   result = f_open(&file, path, FA_WRITE | FA_OPEN_APPEND);
   if (result != FR_OK)
   {
+    storage_mounted = 0U;
     return result;
   }
 
@@ -208,6 +245,11 @@ FRESULT Storage_WriteTestCsv(void)
     }
   }
 
+  if (result != FR_OK)
+  {
+    storage_mounted = 0U;
+  }
+
   return result;
 }
 
@@ -217,18 +259,16 @@ FRESULT Storage_GetCapacityKB(uint32_t *total_kb, uint32_t *free_kb)
   DWORD free_clusters = 0U;
   FRESULT result;
 
-  if (storage_mounted == 0U)
+  result = Storage_EnsureReady(STORAGE_DEFAULT_POWER_DELAY_MS);
+  if (result != FR_OK)
   {
-    result = Storage_Mount();
-    if (result != FR_OK)
-    {
-      return result;
-    }
+    return result;
   }
 
   result = f_getfree((TCHAR const *)SDPath, &free_clusters, &fs);
   if (result != FR_OK)
   {
+    storage_mounted = 0U;
     return result;
   }
   if (fs == NULL)

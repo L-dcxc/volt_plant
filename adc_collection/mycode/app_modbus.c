@@ -417,8 +417,18 @@ uint8_t AppModbus_WriteSingleRegister(uint16_t addr, uint16_t value)
       return MODBUS_EX_ILLEGAL_DATA_VALUE;
     g_config->modbus_addr = (uint8_t)value;
   }
-  else if (addr == 0x0013U) g_config->run_enable = (uint8_t)value;
-  else if (addr == 0x0014U) g_config->average_enable = (uint8_t)value;
+  else if (addr == 0x0013U)
+  {
+    if (value > 1U)
+      return MODBUS_EX_ILLEGAL_DATA_VALUE;
+    g_config->run_enable = (uint8_t)value;
+  }
+  else if (addr == 0x0014U)
+  {
+    if (value > 1U)
+      return MODBUS_EX_ILLEGAL_DATA_VALUE;
+    g_config->average_enable = (uint8_t)value;
+  }
   else if (addr == 0x0015U)
   {
     if (value > 2U)
