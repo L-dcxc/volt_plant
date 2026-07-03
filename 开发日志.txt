@@ -74,3 +74,11 @@ exe生成
 
 6/15
 修复bug
+
+降低睡眠时100uA功耗
+
+修复版本更新问题{生产第二台、第三台如果只是区分设备编号，改这个（APP_CONFIG.h文件内）：
+#define APP_CONFIG_DEFAULT_DEVICE_ID 2UL
+第三台就是 3UL。注意：这个默认值只在“第一次没有有效 EEPROM 配置”或“恢复出厂默认”时生效。如果设备 EEPROM 里已经保存过配置，改代码再烧录不一定会覆盖旧 ID，需要恢复默认或专门写配置。
+固件版本以后升级固件时改这个，比如：
+#define APP_FIRMWARE_VERSION 0x0101U  /* v1.01 */}

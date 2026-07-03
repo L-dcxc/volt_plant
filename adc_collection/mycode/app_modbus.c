@@ -174,7 +174,7 @@ uint8_t AppModbus_ReadHoldingRegisters(uint16_t start_addr, uint16_t count, uint
     /* 0x0000–0x0003: Device Info (read-only) */
     if (addr == 0x0000U) out_regs[i] = (uint16_t)(g_config->device_id >> 16);
     else if (addr == 0x0001U) out_regs[i] = (uint16_t)(g_config->device_id & 0xFFFFU);
-    else if (addr == 0x0002U) out_regs[i] = APP_CONFIG_VERSION;
+    else if (addr == 0x0002U) out_regs[i] = APP_FIRMWARE_VERSION;
     else if (addr == 0x0003U) out_regs[i] = g_config->version;
 
     /* 0x0010–0x0019: System Config */

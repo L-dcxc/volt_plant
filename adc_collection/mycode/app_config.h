@@ -8,6 +8,7 @@ extern "C" {
 #endif
 
 #define APP_CONFIG_MAGIC              0x504C414EUL  /* "PLAN": plant logger configuration image */
+#define APP_FIRMWARE_VERSION          0x0100U       /* BCD-style: 0x0100 = v1.00 */
 #define APP_CONFIG_VERSION            2U
 #define APP_CONFIG_CHANNEL_COUNT      16U
 #define APP_CONFIG_CONTROL_COUNT      4U
