@@ -11,7 +11,7 @@
 /* DAT format currently shares the CSV layout (extension only). Define a
    binary record format here once the spec stabilises. */
 
-#define RECORDER_LINE_BUF_SIZE   256U
+#define RECORDER_LINE_BUF_SIZE   384U
 #define RECORDER_PATH_BUF_SIZE   32U
 #define RECORDER_NAME_BUF_SIZE   16U
 #define RECORDER_SD_RETRY_MS     5000U
@@ -26,8 +26,9 @@
 
 static const AppConfigImage *s_config = NULL;
 
-/* Per-scan buffer: gets the values from the just-completed sample round and
-   is flushed as an "S" row every scan. */
+/* Per-scan buffer: gets the values from the just-completed sample round.
+   It is written as an "S" row only when averaging is disabled and the
+   configured record interval elapses. */
 static int64_t  s_scan_uv[APP_CONFIG_CHANNEL_COUNT];
 static uint32_t s_scan_count[APP_CONFIG_CHANNEL_COUNT];
 
@@ -126,20 +127,135 @@ static const char *Recorder_ExtensionFor(uint8_t file_format)
   }
 }
 
+static uint8_t Recorder_IsLeapYear(uint16_t year)
+{
+  if ((year % 400U) == 0U)
+  {
+    return 1U;
+  }
+  if ((year % 100U) == 0U)
+  {
+    return 0U;
+  }
+  return ((year % 4U) == 0U) ? 1U : 0U;
+}
+
+static uint8_t Recorder_DaysInMonth(uint16_t year, uint8_t month)
+{
+  static const uint8_t days_table[12] =
+  {
+    31U, 28U, 31U, 30U, 31U, 30U,
+    31U, 31U, 30U, 31U, 30U, 31U
+  };
+
+  if ((month < 1U) || (month > 12U))
+  {
+    return 31U;
+  }
+  if ((month == 2U) && (Recorder_IsLeapYear(year) != 0U))
+  {
+    return 29U;
+  }
+  return days_table[month - 1U];
+}
+
+static uint32_t Recorder_DateToDays(uint16_t year, uint8_t month, uint8_t day)
+{
+  uint32_t days = 0UL;
+  uint16_t y;
+  uint8_t m;
+
+  for (y = 2000U; y < year; y++)
+  {
+    days += (Recorder_IsLeapYear(y) != 0U) ? 366UL : 365UL;
+  }
+  for (m = 1U; m < month; m++)
+  {
+    days += Recorder_DaysInMonth(year, m);
+  }
+
+  return days + (uint32_t)(day - 1U);
+}
+
+static void Recorder_DaysToDate(uint32_t days, AppRtcDateTime *date)
+{
+  uint16_t year = 2000U;
+  uint8_t month = 1U;
+
+  if (date == NULL)
+  {
+    return;
+  }
+
+  for (;;)
+  {
+    uint16_t year_days = (Recorder_IsLeapYear(year) != 0U) ? 366U : 365U;
+    if (days < year_days)
+    {
+      break;
+    }
+    days -= year_days;
+    year++;
+  }
+
+  for (;;)
+  {
+    uint8_t month_days = Recorder_DaysInMonth(year, month);
+    if (days < month_days)
+    {
+      break;
+    }
+    days -= month_days;
+    month++;
+  }
+
+  date->year = year;
+  date->month = month;
+  date->day = (uint8_t)(days + 1U);
+  date->hour = 0U;
+  date->minute = 0U;
+  date->second = 0U;
+}
+
 static uint8_t Recorder_BuildFileName(char *out, uint32_t out_size)
 {
   AppRtcDateTime now;
+  AppRtcDateTime file_date;
+  uint16_t span_days = APP_CONFIG_FILE_SPAN_MIN_DAYS;
+  uint32_t days;
+  uint32_t group_start_days;
 
   if (AppRtc_GetDateTime(&now) == 0U)
   {
     return 0U;
   }
 
+  file_date = now;
+  if (s_config != NULL)
+  {
+    span_days = s_config->file_span_days;
+  }
+  if (span_days < APP_CONFIG_FILE_SPAN_MIN_DAYS)
+  {
+    span_days = APP_CONFIG_FILE_SPAN_MIN_DAYS;
+  }
+  if (span_days > APP_CONFIG_FILE_SPAN_MAX_DAYS)
+  {
+    span_days = APP_CONFIG_FILE_SPAN_MAX_DAYS;
+  }
+
+  if (span_days > 1U)
+  {
+    days = Recorder_DateToDays(now.year, now.month, now.day);
+    group_start_days = (days / (uint32_t)span_days) * (uint32_t)span_days;
+    Recorder_DaysToDate(group_start_days, &file_date);
+  }
+
   /* 8.3-compatible: YYMMDD.EXT */
   (void)snprintf(out, out_size, "%02u%02u%02u.%s",
-                 (unsigned)(now.year % 100U),
-                 (unsigned)now.month,
-                 (unsigned)now.day,
+                 (unsigned)(file_date.year % 100U),
+                 (unsigned)file_date.month,
+                 (unsigned)file_date.day,
                  Recorder_ExtensionFor(s_config != NULL ? s_config->file_format
                                                        : (uint8_t)APP_FILE_FORMAT_CSV));
   return 1U;
@@ -378,16 +494,56 @@ static uint8_t Recorder_HasData(const uint32_t *counts)
   return 0U;
 }
 
+static void Recorder_GetChannelName(uint8_t channel, char *out, uint32_t out_size)
+{
+  uint32_t i = 0U;
+
+  if ((out == NULL) || (out_size == 0U))
+  {
+    return;
+  }
+
+  out[0] = '\0';
+
+  if ((s_config != NULL) && (channel < APP_CONFIG_CHANNEL_COUNT) &&
+      (s_config->channel_names[channel][0] != '\0') &&
+      (AppConfig_IsValidChannelName(s_config->channel_names[channel]) != 0U))
+  {
+    while ((s_config->channel_names[channel][i] != '\0') &&
+           ((i + 1U) < out_size))
+    {
+      out[i] = s_config->channel_names[channel][i];
+      i++;
+    }
+    out[i] = '\0';
+    return;
+  }
+
+  (void)snprintf(out, out_size, "CH%u", (unsigned)channel);
+}
+
 static FRESULT Recorder_WriteHeader(FIL *file)
 {
-  static const char *kHeader =
-      "type,timestamp,CH0_uV,CH1_uV,CH2_uV,CH3_uV,CH4_uV,CH5_uV,CH6_uV,CH7_uV,"
-      "CH8_uV,CH9_uV,CH10_uV,CH11_uV,CH12_uV,CH13_uV,CH14_uV,CH15_uV\r\n";
+  char header[RECORDER_LINE_BUF_SIZE];
+  char name[APP_CONFIG_CHANNEL_NAME_LEN + 1U];
   UINT written = 0U;
-  UINT length = (UINT)strlen(kHeader);
+  UINT length;
   FRESULT result;
+  uint32_t offset = 0U;
 
-  result = f_write(file, kHeader, length, &written);
+  offset = Recorder_AppendString(header, sizeof(header), offset, "type,timestamp");
+  for (uint8_t ch = 0U; ch < APP_CONFIG_CHANNEL_COUNT; ch++)
+  {
+    Recorder_GetChannelName(ch, name, sizeof(name));
+    offset = Recorder_AppendString(header, sizeof(header), offset, ",");
+    offset = Recorder_AppendString(header, sizeof(header), offset, name);
+    offset = Recorder_AppendString(header, sizeof(header), offset, "_uV");
+  }
+  offset = Recorder_AppendString(header, sizeof(header), offset, "\r\n");
+  (void)offset;
+
+  length = (UINT)strlen(header);
+  result = f_write(file, header, length, &written);
   if (result != FR_OK)
   {
     return result;
@@ -586,16 +742,19 @@ void Recorder_OnChannelSample(uint8_t channel, int32_t voltage_uv)
   s_acc_count[channel]++;
 }
 
-/* Called after every completed sample round (every sample_interval_sec).
- * Always writes an "S" row with this scan's data. If averaging is enabled
- * and the record interval has elapsed since the last "A" row, additionally
- * writes an "A" row and resets the averaging window. */
+/* Called after every completed sample round.
+ * average_enable=1: only writes an "A" row when the record interval elapses.
+ * average_enable=0: the main scheduler samples at record_interval_sec, so
+ * each completed scan is written as an "S" row immediately. Per-scan rows are
+ * no longer logged while averaging is enabled. */
 void Recorder_OnScanComplete(void)
 {
   char timestamp[APP_RTC_TIMESTAMP_SIZE];
   char line[RECORDER_LINE_BUF_SIZE];
   FRESULT fr;
   uint8_t have_ts = 0U;
+  uint32_t interval_ms;
+  uint32_t elapsed;
 
   if (s_config == NULL)
   {
@@ -613,35 +772,62 @@ void Recorder_OnScanComplete(void)
     have_ts = 1U;
   }
 
-  /* 1) Sample row — every completed scan. */
-  if (have_ts != 0U && Recorder_HasData(s_scan_count) != 0U)
+  if (s_config->average_enable == 0U)
   {
-    Recorder_BuildDataLine(line, sizeof(line), 'S', timestamp,
-                            s_scan_uv, s_scan_count);
-    fr = Recorder_QueueLine(line, 0U);
+    if ((have_ts != 0U) && (Recorder_HasData(s_scan_count) != 0U))
+    {
+      Recorder_BuildDataLine(line, sizeof(line), 'S', timestamp,
+                             s_scan_uv, s_scan_count);
+      fr = Recorder_QueueLine(line, 1U);
+      if (fr != FR_OK)
+      {
+        s_sd_ok = 0U;
+      }
+      else
+      {
+        s_sd_ok = 1U;
+      }
+    }
+    else
+    {
+      fr = Recorder_FlushCachedLines();
+      if (fr != FR_OK)
+      {
+        s_sd_ok = 0U;
+      }
+    }
+
+    Recorder_ClearScan();
+    Recorder_ClearAcc();
+    s_last_record_tick = HAL_GetTick();
+    return;
+  }
+
+  interval_ms = s_config->record_interval_sec * 1000UL;
+  if (interval_ms == 0UL)
+  {
+    interval_ms = 1000UL;
+  }
+
+  elapsed = HAL_GetTick() - s_last_record_tick;
+  if ((s_line_cache_count != 0U) && (elapsed < interval_ms))
+  {
+    fr = Recorder_FlushCachedLines();
     if (fr != FR_OK)
     {
       s_sd_ok = 0U;
     }
-  }
-  Recorder_ClearScan();
-
-  /* 2) Average row — when averaging is enabled and the record interval has
-        elapsed. Advances last_record_tick by exact interval_ms instead of
-        snapping to HAL_GetTick(), so the cadence does not drift by the
-        sample interval. */
-  if (s_config->average_enable != 0U)
-  {
-    uint32_t interval_ms = s_config->record_interval_sec * 1000UL;
-    if (interval_ms == 0UL)
+    else
     {
-      interval_ms = 1000UL;
+      s_sd_ok = 1U;
     }
+  }
 
-    uint32_t elapsed = HAL_GetTick() - s_last_record_tick;
-    if (elapsed >= interval_ms)
+  if (elapsed >= interval_ms)
+  {
+    if (s_config->average_enable != 0U)
     {
-      if (have_ts != 0U && Recorder_HasData(s_acc_count) != 0U)
+      if ((have_ts != 0U) && (Recorder_HasData(s_acc_count) != 0U))
       {
         Recorder_BuildDataLine(line, sizeof(line), 'A', timestamp,
                                 s_acc_uv, s_acc_count);
@@ -663,20 +849,22 @@ void Recorder_OnScanComplete(void)
           s_sd_ok = 0U;
         }
       }
-      Recorder_ClearAcc();
+    }
+    Recorder_ClearAcc();
 
-      /* Advance by full intervals; if we lagged badly (e.g. SD stall, paused
-         sampling), resync to now to avoid a burst of catch-up rows. */
-      if (elapsed >= (interval_ms * 2UL))
-      {
-        s_last_record_tick = HAL_GetTick();
-      }
-      else
-      {
-        s_last_record_tick += interval_ms;
-      }
+    /* Advance by full intervals; if we lagged badly (e.g. SD stall, paused
+       sampling), resync to now to avoid a burst of catch-up rows. */
+    if (elapsed >= (interval_ms * 2UL))
+    {
+      s_last_record_tick = HAL_GetTick();
+    }
+    else
+    {
+      s_last_record_tick += interval_ms;
     }
   }
+
+  Recorder_ClearScan();
 }
 
 uint8_t Recorder_Flush(void)
@@ -730,7 +918,6 @@ uint8_t Recorder_NextScanWillFlush(void)
 {
   uint32_t interval_ms;
   uint32_t elapsed;
-  uint8_t target_lines;
 
   if (s_config == NULL || s_config->run_enable == 0U)
   {
@@ -743,19 +930,14 @@ uint8_t Recorder_NextScanWillFlush(void)
     return 1U;
   }
 
-  /* This scan will queue one S-row; if that fills the cache target, the
-     queue path will flush it immediately. */
-  target_lines = Recorder_TargetCacheLines();
-  if (((uint32_t)s_line_cache_count + 1U) >= (uint32_t)target_lines)
+  if (s_config->average_enable == 0U)
   {
     return 1U;
   }
 
-  /* Averaging enabled and the record interval is about to expire → A-row
-     will queue with force_flush. Use the same elapsed-vs-interval check as
-     OnScanComplete, but evaluated before the scan; sample_interval_sec
-     grace prevents a borderline tick from being missed. */
-  if (s_config->average_enable != 0U && s_record_tick_inited != 0U)
+  /* Either averaging mode writes exactly when record_interval_sec elapses:
+     A-row if averaging is enabled, otherwise one S-row from the latest scan. */
+  if (s_record_tick_inited != 0U)
   {
     interval_ms = s_config->record_interval_sec * 1000UL;
     if (interval_ms == 0UL)

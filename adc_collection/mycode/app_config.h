@@ -8,11 +8,14 @@ extern "C" {
 #endif
 
 #define APP_CONFIG_MAGIC              0x504C414EUL  /* "PLAN": plant logger configuration image */
-#define APP_FIRMWARE_VERSION          0x0100U       /* BCD-style: 0x0100 = v1.00 */
-#define APP_CONFIG_VERSION            2U
+#define APP_FIRMWARE_VERSION          0x0101U       /* BCD-style: 0x0101 = v1.01 */
+#define APP_CONFIG_VERSION            3U
 #define APP_CONFIG_CHANNEL_COUNT      16U
 #define APP_CONFIG_CONTROL_COUNT      4U
 #define APP_CONFIG_RESERVED_SIZE      64U
+#define APP_CONFIG_CHANNEL_NAME_LEN   12U
+#define APP_CONFIG_FILE_SPAN_MIN_DAYS 1U
+#define APP_CONFIG_FILE_SPAN_MAX_DAYS 365U
 
 #define APP_CONFIG_DEFAULT_DEVICE_ID          1UL
 #define APP_CONFIG_DEFAULT_MODBUS_ADDR        1U
@@ -129,11 +132,24 @@ typedef struct
   uint32_t sample_interval_sec;
   uint32_t record_interval_sec;
 
+  uint16_t file_span_days;
+  uint8_t record_start_enable;
+  uint8_t reserved0;
+
+  uint16_t record_start_year;
+  uint8_t record_start_month;
+  uint8_t record_start_day;
+  uint8_t record_start_hour;
+  uint8_t record_start_minute;
+  uint8_t record_start_second;
+  uint8_t reserved1;
+
   uint16_t adc_vref_mv;
   uint8_t adc_default_gain;
   uint8_t adc_default_filter;
 
   AppChannelConfig channels[APP_CONFIG_CHANNEL_COUNT];
+  char channel_names[APP_CONFIG_CHANNEL_COUNT][APP_CONFIG_CHANNEL_NAME_LEN + 1U];
   AppControlOutputConfig controls[APP_CONFIG_CONTROL_COUNT];
 
   uint8_t reserved[APP_CONFIG_RESERVED_SIZE];
@@ -142,6 +158,7 @@ typedef struct
 void AppConfig_LoadDefaults(AppConfigImage *config);
 uint8_t AppConfig_IsValid(const AppConfigImage *config);
 uint8_t AppConfig_IsValidAdcInput(uint8_t input);
+uint8_t AppConfig_IsValidChannelName(const char *name);
 uint8_t AppConfig_IsDifferentialChannel(const AppChannelConfig *channel);
 uint32_t AppConfig_GetEnabledChannelMask(const AppConfigImage *config);
 

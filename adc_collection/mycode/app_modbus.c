@@ -17,6 +17,10 @@ static uint16_t g_system_status = 0U;
 static uint16_t g_last_error_code = 0U;
 static AppModbusReconfigureCb g_reconfigure_cb = NULL;
 
+#define APP_MODBUS_CH_NAME_BASE   0x0300U
+#define APP_MODBUS_CH_NAME_STRIDE 0x0006U
+#define APP_MODBUS_CH_NAME_END    (APP_MODBUS_CH_NAME_BASE + (APP_CONFIG_CHANNEL_COUNT * APP_MODBUS_CH_NAME_STRIDE) - 1U)
+
 /* File transfer state (see modbus_register_map.md §0x0060-0x0074). */
 static uint16_t g_file_xfer_state = 0U;
 static uint16_t g_file_index = 0U;
@@ -161,6 +165,115 @@ static uint8_t AppModbus_IsValidControlConfig(const AppControlOutputConfig *ctrl
   return 1U;
 }
 
+static uint8_t AppModbus_IsChannelNameAddr(uint16_t addr)
+{
+  return ((addr >= APP_MODBUS_CH_NAME_BASE) && (addr <= APP_MODBUS_CH_NAME_END)) ? 1U : 0U;
+}
+
+static uint8_t AppModbus_DecodeChannelNameAddr(uint16_t addr,
+                                               uint8_t *channel,
+                                               uint8_t *name_reg)
+{
+  uint16_t offset;
+
+  if (AppModbus_IsChannelNameAddr(addr) == 0U)
+  {
+    return 0U;
+  }
+
+  offset = addr - APP_MODBUS_CH_NAME_BASE;
+  if (channel != NULL)
+  {
+    *channel = (uint8_t)(offset / APP_MODBUS_CH_NAME_STRIDE);
+  }
+  if (name_reg != NULL)
+  {
+    *name_reg = (uint8_t)(offset % APP_MODBUS_CH_NAME_STRIDE);
+  }
+
+  return 1U;
+}
+
+static uint8_t AppModbus_IsNameByteValid(uint8_t byte)
+{
+  if (byte == 0U)
+  {
+    return 1U;
+  }
+  if ((byte < 0x20U) || (byte > 0x7EU) || (byte == ',') || (byte == '"'))
+  {
+    return 0U;
+  }
+  return 1U;
+}
+
+static uint8_t AppModbus_ReadChannelNameReg(uint16_t addr, uint16_t *out_reg)
+{
+  uint8_t channel;
+  uint8_t name_reg;
+  uint8_t hi = 0U;
+  uint8_t lo = 0U;
+  uint16_t char_index;
+
+  if ((g_config == NULL) || (out_reg == NULL) ||
+      (AppModbus_DecodeChannelNameAddr(addr, &channel, &name_reg) == 0U))
+  {
+    return 0U;
+  }
+
+  char_index = (uint16_t)name_reg * 2U;
+  if (char_index < APP_CONFIG_CHANNEL_NAME_LEN)
+  {
+    hi = (uint8_t)g_config->channel_names[channel][char_index];
+  }
+  if ((char_index + 1U) < APP_CONFIG_CHANNEL_NAME_LEN)
+  {
+    lo = (uint8_t)g_config->channel_names[channel][char_index + 1U];
+  }
+
+  *out_reg = ((uint16_t)hi << 8) | lo;
+  return 1U;
+}
+
+static uint8_t AppModbus_WriteChannelNameReg(uint16_t addr, uint16_t value)
+{
+  uint8_t channel;
+  uint8_t name_reg;
+  uint8_t hi = (uint8_t)(value >> 8);
+  uint8_t lo = (uint8_t)(value & 0xFFU);
+  uint16_t char_index;
+
+  if ((g_config == NULL) ||
+      (AppModbus_DecodeChannelNameAddr(addr, &channel, &name_reg) == 0U))
+  {
+    return MODBUS_EX_ILLEGAL_DATA_ADDRESS;
+  }
+
+  if ((AppModbus_IsNameByteValid(hi) == 0U) ||
+      (AppModbus_IsNameByteValid(lo) == 0U))
+  {
+    return MODBUS_EX_ILLEGAL_DATA_VALUE;
+  }
+
+  char_index = (uint16_t)name_reg * 2U;
+  if (char_index < APP_CONFIG_CHANNEL_NAME_LEN)
+  {
+    g_config->channel_names[channel][char_index] = (char)hi;
+  }
+  if ((char_index + 1U) < APP_CONFIG_CHANNEL_NAME_LEN)
+  {
+    g_config->channel_names[channel][char_index + 1U] = (char)lo;
+  }
+  g_config->channel_names[channel][APP_CONFIG_CHANNEL_NAME_LEN] = '\0';
+
+  if (AppConfig_IsValidChannelName(g_config->channel_names[channel]) == 0U)
+  {
+    return MODBUS_EX_ILLEGAL_DATA_VALUE;
+  }
+
+  return 0U;
+}
+
 /* Read Holding Registers (FC03) */
 uint8_t AppModbus_ReadHoldingRegisters(uint16_t start_addr, uint16_t count, uint16_t *out_regs)
 {
@@ -177,7 +290,7 @@ uint8_t AppModbus_ReadHoldingRegisters(uint16_t start_addr, uint16_t count, uint
     else if (addr == 0x0002U) out_regs[i] = APP_FIRMWARE_VERSION;
     else if (addr == 0x0003U) out_regs[i] = g_config->version;
 
-    /* 0x0010–0x0019: System Config */
+    /* 0x0010–0x001F: System Config */
     else if (addr == 0x0010U) out_regs[i] = g_config->modbus_addr;
     else if (addr == 0x0011U) out_regs[i] = (uint16_t)(g_config->uart_baudrate >> 16);
     else if (addr == 0x0012U) out_regs[i] = (uint16_t)(g_config->uart_baudrate & 0xFFFFU);
@@ -188,6 +301,12 @@ uint8_t AppModbus_ReadHoldingRegisters(uint16_t start_addr, uint16_t count, uint
     else if (addr == 0x0017U) out_regs[i] = (uint16_t)(g_config->sample_interval_sec & 0xFFFFU);
     else if (addr == 0x0018U) out_regs[i] = (uint16_t)(g_config->record_interval_sec >> 16);
     else if (addr == 0x0019U) out_regs[i] = (uint16_t)(g_config->record_interval_sec & 0xFFFFU);
+    else if (addr == 0x001AU) out_regs[i] = g_config->file_span_days;
+    else if (addr == 0x001BU) out_regs[i] = g_config->record_start_enable;
+    else if (addr == 0x001CU) out_regs[i] = g_config->record_start_year;
+    else if (addr == 0x001DU) out_regs[i] = ((uint16_t)g_config->record_start_month << 8) | g_config->record_start_day;
+    else if (addr == 0x001EU) out_regs[i] = ((uint16_t)g_config->record_start_hour << 8) | g_config->record_start_minute;
+    else if (addr == 0x001FU) out_regs[i] = g_config->record_start_second;
 
     /* 0x0020–0x0022: ADC Config */
     else if (addr == 0x0020U) out_regs[i] = g_config->adc_vref_mv;
@@ -265,6 +384,13 @@ uint8_t AppModbus_ReadHoldingRegisters(uint16_t start_addr, uint16_t count, uint
       else if (reg_offset == 0x6U) out_regs[i] = (uint16_t)(ctrl->phase_offset_sec >> 16);
       else if (reg_offset == 0x7U) out_regs[i] = (uint16_t)(ctrl->phase_offset_sec & 0xFFFFU);
       else out_regs[i] = 0U; /* Reserved */
+    }
+
+    /* 0x0300–0x035F: Channel Names (16 channels × 6 regs × 2 ASCII chars) */
+    else if (AppModbus_IsChannelNameAddr(addr) != 0U)
+    {
+      if (AppModbus_ReadChannelNameReg(addr, &out_regs[i]) == 0U)
+        return MODBUS_EX_ILLEGAL_DATA_ADDRESS;
     }
 
     /* 0x0060–0x0061: File Transfer Control */
@@ -410,7 +536,7 @@ uint8_t AppModbus_WriteSingleRegister(uint16_t addr, uint16_t value)
   if (addr <= 0x0003U)
     return MODBUS_EX_ILLEGAL_DATA_ADDRESS;
 
-  /* 0x0010–0x0019: System Config */
+  /* 0x0010–0x001F: System Config */
   if (addr == 0x0010U)
   {
     if (value < 1U || value > 247U)
@@ -434,6 +560,49 @@ uint8_t AppModbus_WriteSingleRegister(uint16_t addr, uint16_t value)
     if (value > 2U)
       return MODBUS_EX_ILLEGAL_DATA_VALUE;
     g_config->file_format = (uint8_t)value;
+  }
+  else if (addr == 0x001AU)
+  {
+    if ((value < APP_CONFIG_FILE_SPAN_MIN_DAYS) ||
+        (value > APP_CONFIG_FILE_SPAN_MAX_DAYS))
+      return MODBUS_EX_ILLEGAL_DATA_VALUE;
+    g_config->file_span_days = value;
+  }
+  else if (addr == 0x001BU)
+  {
+    if (value > 1U)
+      return MODBUS_EX_ILLEGAL_DATA_VALUE;
+    g_config->record_start_enable = (uint8_t)value;
+  }
+  else if (addr == 0x001CU)
+  {
+    if ((value < 2000U) || (value > 2099U))
+      return MODBUS_EX_ILLEGAL_DATA_VALUE;
+    g_config->record_start_year = value;
+  }
+  else if (addr == 0x001DU)
+  {
+    uint8_t month = (uint8_t)(value >> 8);
+    uint8_t day = (uint8_t)(value & 0xFFU);
+    if ((month < 1U) || (month > 12U) || (day < 1U) || (day > 31U))
+      return MODBUS_EX_ILLEGAL_DATA_VALUE;
+    g_config->record_start_month = month;
+    g_config->record_start_day = day;
+  }
+  else if (addr == 0x001EU)
+  {
+    uint8_t hour = (uint8_t)(value >> 8);
+    uint8_t minute = (uint8_t)(value & 0xFFU);
+    if ((hour > 23U) || (minute > 59U))
+      return MODBUS_EX_ILLEGAL_DATA_VALUE;
+    g_config->record_start_hour = hour;
+    g_config->record_start_minute = minute;
+  }
+  else if (addr == 0x001FU)
+  {
+    if (value > 59U)
+      return MODBUS_EX_ILLEGAL_DATA_VALUE;
+    g_config->record_start_second = (uint8_t)value;
   }
 
   /* 0x0020–0x0022: ADC Config */
@@ -503,6 +672,12 @@ uint8_t AppModbus_WriteSingleRegister(uint16_t addr, uint16_t value)
       return MODBUS_EX_ILLEGAL_DATA_VALUE; /* Can't force disabled control */
     ControlOutputs_SetForce(ctrl_idx, (uint8_t)value);
     ControlOutputs_Poll();
+  }
+
+  /* 0x0300–0x035F: Channel Names */
+  else if (AppModbus_IsChannelNameAddr(addr) != 0U)
+  {
+    return AppModbus_WriteChannelNameReg(addr, value);
   }
 
   /* 0x0061: FILE_INDEX (stage the index for the next SELECT/START/DELETE) */

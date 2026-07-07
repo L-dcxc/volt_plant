@@ -1,6 +1,7 @@
 #include "app_config.h"
 
 #include <stddef.h>
+#include <stdio.h>
 
 #define APP_CONFIG_CONTROL_DEFAULT_INTERVAL_S 600UL
 #define APP_CONFIG_CONTROL_DEFAULT_ON_DURATION_S 30UL
@@ -60,6 +61,79 @@ static void AppConfig_SetControl(AppControlOutputConfig *control,
   control->phase_offset_sec = phase_offset_sec;
 }
 
+static uint8_t AppConfig_IsLeapYear(uint16_t year)
+{
+  if ((year % 400U) == 0U)
+  {
+    return 1U;
+  }
+  if ((year % 100U) == 0U)
+  {
+    return 0U;
+  }
+  return ((year % 4U) == 0U) ? 1U : 0U;
+}
+
+static uint8_t AppConfig_DaysInMonth(uint16_t year, uint8_t month)
+{
+  static const uint8_t days_table[12] =
+  {
+    31U, 28U, 31U, 30U, 31U, 30U,
+    31U, 31U, 30U, 31U, 30U, 31U
+  };
+
+  if ((month < 1U) || (month > 12U))
+  {
+    return 0U;
+  }
+  if ((month == 2U) && (AppConfig_IsLeapYear(year) != 0U))
+  {
+    return 29U;
+  }
+  return days_table[month - 1U];
+}
+
+static uint8_t AppConfig_IsValidDateTime(uint16_t year,
+                                         uint8_t month,
+                                         uint8_t day,
+                                         uint8_t hour,
+                                         uint8_t minute,
+                                         uint8_t second)
+{
+  uint8_t max_day;
+
+  if ((year < 2000U) || (year > 2099U))
+  {
+    return 0U;
+  }
+
+  max_day = AppConfig_DaysInMonth(year, month);
+  if ((max_day == 0U) || (day < 1U) || (day > max_day))
+  {
+    return 0U;
+  }
+
+  if ((hour > 23U) || (minute > 59U) || (second > 59U))
+  {
+    return 0U;
+  }
+
+  return 1U;
+}
+
+static void AppConfig_SetDefaultChannelName(AppConfigImage *config, uint32_t channel)
+{
+  if ((config == NULL) || (channel >= APP_CONFIG_CHANNEL_COUNT))
+  {
+    return;
+  }
+
+  (void)snprintf(config->channel_names[channel],
+                 APP_CONFIG_CHANNEL_NAME_LEN + 1U,
+                 "CH%lu",
+                 (unsigned long)channel);
+}
+
 void AppConfig_LoadDefaults(AppConfigImage *config)
 {
   uint32_t i;
@@ -86,6 +160,14 @@ void AppConfig_LoadDefaults(AppConfigImage *config)
   config->uart_baudrate = APP_CONFIG_DEFAULT_UART_BAUDRATE;
   config->sample_interval_sec = APP_CONFIG_DEFAULT_SAMPLE_INTERVAL_S;
   config->record_interval_sec = APP_CONFIG_DEFAULT_RECORD_INTERVAL_S;
+  config->file_span_days = APP_CONFIG_FILE_SPAN_MIN_DAYS;
+  config->record_start_enable = 0U;
+  config->record_start_year = 2026U;
+  config->record_start_month = 1U;
+  config->record_start_day = 1U;
+  config->record_start_hour = 0U;
+  config->record_start_minute = 0U;
+  config->record_start_second = 0U;
 
   config->adc_vref_mv = APP_CONFIG_DEFAULT_ADC_VREF_MV;
   config->adc_default_gain = APP_CONFIG_DEFAULT_ADC_GAIN;
@@ -101,6 +183,7 @@ void AppConfig_LoadDefaults(AppConfigImage *config)
                          APP_SENSOR_TYPE_CUSTOM,
                          APP_CONFIG_2V_RANGE_UV,
                          APP_CONFIG_DEFAULT_ADC_GAIN);
+    AppConfig_SetDefaultChannelName(config, i);
   }
 
   /* Default policy: expose all AD7124 AIN0~AIN15 as enabled single-ended
@@ -122,6 +205,38 @@ uint8_t AppConfig_IsValidAdcInput(uint8_t input)
   if (input == APP_ADC_INPUT_AVSS)
   {
     return 1U;
+  }
+
+  return 0U;
+}
+
+uint8_t AppConfig_IsValidChannelName(const char *name)
+{
+  uint32_t i;
+
+  if (name == NULL)
+  {
+    return 0U;
+  }
+
+  for (i = 0U; i <= APP_CONFIG_CHANNEL_NAME_LEN; i++)
+  {
+    char ch = name[i];
+    if (ch == '\0')
+    {
+      return 1U;
+    }
+
+    if (i >= APP_CONFIG_CHANNEL_NAME_LEN)
+    {
+      return 0U;
+    }
+
+    if (((uint8_t)ch < 0x20U) || ((uint8_t)ch > 0x7EU) ||
+        (ch == ',') || (ch == '"'))
+    {
+      return 0U;
+    }
   }
 
   return 0U;
@@ -179,9 +294,37 @@ uint8_t AppConfig_IsValid(const AppConfigImage *config)
     return 0U;
   }
 
+  if (config->average_enable > 1U)
+  {
+    return 0U;
+  }
+
   if ((config->sample_interval_sec == 0UL) ||
-      (config->record_interval_sec == 0UL) ||
+      (config->record_interval_sec == 0UL))
+  {
+    return 0U;
+  }
+
+  if ((config->average_enable != 0U) &&
       (config->record_interval_sec < config->sample_interval_sec))
+  {
+    return 0U;
+  }
+
+  if ((config->file_span_days < APP_CONFIG_FILE_SPAN_MIN_DAYS) ||
+      (config->file_span_days > APP_CONFIG_FILE_SPAN_MAX_DAYS) ||
+      (config->record_start_enable > 1U))
+  {
+    return 0U;
+  }
+
+  if ((config->record_start_enable != 0U) &&
+      (AppConfig_IsValidDateTime(config->record_start_year,
+                                 config->record_start_month,
+                                 config->record_start_day,
+                                 config->record_start_hour,
+                                 config->record_start_minute,
+                                 config->record_start_second) == 0U))
   {
     return 0U;
   }
@@ -199,6 +342,11 @@ uint8_t AppConfig_IsValid(const AppConfigImage *config)
   for (i = 0U; i < APP_CONFIG_CHANNEL_COUNT; i++)
   {
     const AppChannelConfig *channel = &config->channels[i];
+
+    if (AppConfig_IsValidChannelName(config->channel_names[i]) == 0U)
+    {
+      return 0U;
+    }
 
     if (channel->enable == 0U)
     {

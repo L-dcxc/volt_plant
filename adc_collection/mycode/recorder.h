@@ -15,9 +15,11 @@ extern "C" {
  *     Recorder_OnChannelSample(ch, voltage_uv);
  *   Recorder_OnScanComplete();
  *
- * Recorder decides when to flush a row to SD based on average_enable +
- * record_interval_sec. Filename rotates per day (YYMMDD.CSV/DAT/TXT, 8.3
- * format since FatFs LFN is disabled). */
+ * Recorder writes one row per record_interval_sec: A rows contain the average
+ * window when average_enable=1. When average_enable=0 the main scheduler
+ * samples at record_interval_sec and each scan is written as one S row.
+ * Filename rotates by file_span_days
+ * (YYMMDD.CSV/DAT/TXT, 8.3 format since FatFs LFN is disabled). */
 
 void Recorder_Init(const AppConfigImage *config);
 void Recorder_OnChannelSample(uint8_t channel, int32_t voltage_uv);

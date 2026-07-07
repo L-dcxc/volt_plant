@@ -121,6 +121,7 @@ static uint8_t led_notice_active = 0U;
 static uint8_t led_notice_phase = 0U;
 static uint32_t led_notice_tick = 0U;
 static volatile uint8_t stop2_rtc_wakeup = 0U;
+static uint8_t record_start_waiting = 0U;
 #define BATTERY_UPDATE_INTERVAL_MS  30000U
 
 /* USER CODE END PV */
@@ -392,6 +393,126 @@ static void AppModbusRx_SetArmed(uint8_t armed)
   }
 }
 
+static uint8_t AppRecordStartEnabled(void)
+{
+  return ((app_config.run_enable != 0U) &&
+          (app_config.record_start_enable != 0U)) ? 1U : 0U;
+}
+
+static uint8_t AppDateTime_IsLeapYear(uint16_t year)
+{
+  if ((year % 400U) == 0U)
+  {
+    return 1U;
+  }
+  if ((year % 100U) == 0U)
+  {
+    return 0U;
+  }
+  return ((year % 4U) == 0U) ? 1U : 0U;
+}
+
+static uint8_t AppDateTime_DaysInMonth(uint16_t year, uint8_t month)
+{
+  static const uint8_t days_table[12] =
+  {
+    31U, 28U, 31U, 30U, 31U, 30U,
+    31U, 31U, 30U, 31U, 30U, 31U
+  };
+
+  if ((month < 1U) || (month > 12U))
+  {
+    return 31U;
+  }
+  if ((month == 2U) && (AppDateTime_IsLeapYear(year) != 0U))
+  {
+    return 29U;
+  }
+  return days_table[month - 1U];
+}
+
+static uint32_t AppDateTime_ToSeconds(const AppRtcDateTime *dt)
+{
+  uint32_t days = 0UL;
+  uint16_t year;
+  uint8_t month;
+
+  if (dt == NULL)
+  {
+    return 0UL;
+  }
+
+  for (year = 2000U; year < dt->year; year++)
+  {
+    days += (AppDateTime_IsLeapYear(year) != 0U) ? 366UL : 365UL;
+  }
+  for (month = 1U; month < dt->month; month++)
+  {
+    days += AppDateTime_DaysInMonth(dt->year, month);
+  }
+  days += (uint32_t)(dt->day - 1U);
+
+  return (days * 86400UL) +
+         ((uint32_t)dt->hour * 3600UL) +
+         ((uint32_t)dt->minute * 60UL) +
+         (uint32_t)dt->second;
+}
+
+static AppRtcDateTime AppRecordStartDateTime(void)
+{
+  AppRtcDateTime dt;
+
+  dt.year = app_config.record_start_year;
+  dt.month = app_config.record_start_month;
+  dt.day = app_config.record_start_day;
+  dt.hour = app_config.record_start_hour;
+  dt.minute = app_config.record_start_minute;
+  dt.second = app_config.record_start_second;
+
+  return dt;
+}
+
+static uint32_t AppRecordStartSecondsUntil(void)
+{
+  AppRtcDateTime now;
+  AppRtcDateTime start;
+  uint32_t now_s;
+  uint32_t start_s;
+
+  if (AppRecordStartEnabled() == 0U)
+  {
+    return 0UL;
+  }
+
+  if (AppRtc_GetDateTime(&now) == 0U)
+  {
+    return 0UL;
+  }
+
+  start = AppRecordStartDateTime();
+  now_s = AppDateTime_ToSeconds(&now);
+  start_s = AppDateTime_ToSeconds(&start);
+
+  return (now_s < start_s) ? (start_s - now_s) : 0UL;
+}
+
+static uint8_t AppRecordStartReached(void)
+{
+  return (AppRecordStartSecondsUntil() == 0UL) ? 1U : 0U;
+}
+
+static uint32_t AppEffectiveSampleIntervalSeconds(void)
+{
+  uint32_t interval = app_config.sample_interval_sec;
+
+  if (app_config.average_enable == 0U)
+  {
+    interval = app_config.record_interval_sec;
+  }
+
+  return (interval == 0UL) ? 1UL : interval;
+}
+
 static uint8_t AppSamplingDueSoon(uint32_t now_tick)
 {
   uint32_t interval_ms;
@@ -402,11 +523,12 @@ static uint8_t AppSamplingDueSoon(uint32_t now_tick)
     return 0U;
   }
 
-  interval_ms = app_config.sample_interval_sec * 1000UL;
-  if (interval_ms == 0UL)
+  if (AppRecordStartReached() == 0U)
   {
-    interval_ms = 1000UL;
+    return 0U;
   }
+
+  interval_ms = AppEffectiveSampleIntervalSeconds() * 1000UL;
 
   elapsed = now_tick - sample_tick;
   if (elapsed >= interval_ms)
@@ -423,14 +545,19 @@ static uint32_t AppNextStop2SleepSeconds(uint32_t now_tick)
 
   if ((app_config.run_enable != 0U) && (ad7124_ready != 0U))
   {
-    uint32_t interval_ms = app_config.sample_interval_sec * 1000UL;
+    uint32_t start_wait_seconds = AppRecordStartSecondsUntil();
+    uint32_t interval_ms = AppEffectiveSampleIntervalSeconds() * 1000UL;
     uint32_t elapsed;
     uint32_t remaining_ms;
     uint32_t sample_limited_seconds;
 
-    if (interval_ms == 0UL)
+    if (start_wait_seconds > 0UL)
     {
-      interval_ms = 1000UL;
+      if (start_wait_seconds < sleep_seconds)
+      {
+        sleep_seconds = start_wait_seconds;
+      }
+      return sleep_seconds;
     }
 
     elapsed = now_tick - sample_tick;
@@ -1110,6 +1237,7 @@ int main(void)
       }
       sample_tick = HAL_GetTick();
       Recorder_ResetTiming();
+      record_start_waiting = (AppRecordStartReached() == 0U) ? 1U : 0U;
     }
     else if ((app_config.run_enable == 0U) && (prev_run_enable != 0U))
     {
@@ -1118,6 +1246,7 @@ int main(void)
       {
         AppBlinkSdWrite();
       }
+      record_start_waiting = 0U;
     }
     prev_run_enable = app_config.run_enable;
 
@@ -1125,13 +1254,22 @@ int main(void)
        only the schedule + Modbus realtime updates + SD writes are gated. */
     if ((app_config.run_enable != 0U) && (ad7124_ready != 0U))
     {
-      uint32_t interval_ms = app_config.sample_interval_sec * 1000UL;
-      if (interval_ms == 0UL)
+      uint32_t interval_ms = AppEffectiveSampleIntervalSeconds() * 1000UL;
+      uint8_t start_reached;
+
+      start_reached = AppRecordStartReached();
+      if (start_reached == 0U)
       {
-        interval_ms = 1000UL;
+        record_start_waiting = 1U;
+      }
+      else if (record_start_waiting != 0U)
+      {
+        record_start_waiting = 0U;
+        Recorder_ResetTiming();
+        sample_tick = HAL_GetTick() - interval_ms;
       }
 
-      if ((HAL_GetTick() - sample_tick) >= interval_ms)
+      if ((start_reached != 0U) && ((HAL_GetTick() - sample_tick) >= interval_ms))
       {
         uint8_t round_idx;
         uint8_t enabled_count = 0U;
