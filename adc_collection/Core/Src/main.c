@@ -1151,6 +1151,7 @@ int main(void)
 
   /* Bring up the periodic recorder (accumulators + day-rotated SD writer) */
   Recorder_Init(&app_config);
+  sd_ok = Recorder_GetSdOk();
   ControlOutputs_Init(&app_config);
   Battery_Init();
   (void)Battery_Update();   /* seed an initial reading for the host */
@@ -1169,6 +1170,9 @@ int main(void)
 
     AppModbus_Init(&app_config, &app_config_store);
     AppModbus_SetReconfigureCallback(AppModbus_ReconfigureAd7124);
+    /* Publish the boot checks before the first host request, even when the
+       first scan is minutes away or waiting for a configured start time. */
+    AppModbus_UpdateSystemStatus(ad7124_ready, eeprom_ok, rtc_ok, sd_ok, app_config.run_enable);
     ModbusRtu_Init(&huart1, app_config.modbus_addr, &modbus_cb);
     /* Boot directly into low-power mode: no post-boot 60 s serial window.
        Host must wake the device first (KEY0 short press) before Modbus. */
@@ -1322,6 +1326,7 @@ int main(void)
 
           if (modbus_enabled != 0U)
           {
+            AppModbus_UpdateSystemStatus(ad7124_ready, eeprom_ok, rtc_ok, sd_ok, app_config.run_enable);
             ModbusRtu_Poll();
           }
 
@@ -1388,12 +1393,6 @@ int main(void)
         }
       }
     }
-    else if (modbus_enabled != 0U)
-    {
-      /* Paused: still keep RUNNING bit in Modbus status truthful so the UI
-         reflects the stop. */
-      AppModbus_UpdateSystemStatus(ad7124_ready, eeprom_ok, rtc_ok, sd_ok, app_config.run_enable);
-    }
 
     /* Keep the legacy debug printf loop available behind ad7124_loop_print_enable
        for bench debugging, but disabled by default to keep USART2 quiet during
@@ -1401,9 +1400,11 @@ int main(void)
     (void)ad7124_loop_print_enable;
     (void)ad7124_print_tick;
 
-    /* Modbus RTU polling */
+    /* Status is independent of the sampling cadence, including while waiting
+       for the first record time. Keep it current before servicing requests. */
     if (modbus_enabled != 0U)
     {
+      AppModbus_UpdateSystemStatus(ad7124_ready, eeprom_ok, rtc_ok, sd_ok, app_config.run_enable);
       ModbusRtu_Poll();
     }
 
@@ -1432,6 +1433,7 @@ int main(void)
         char file_path[FILE_BROWSER_NAME_SIZE + 8U];
         FRESULT ready;
         YModemResult yr;
+        uint8_t had_pending_write;
 
         ready = Storage_EnsureReady(APP_SD_POWER_SETTLE_MS);
         if (ready != FR_OK)
@@ -1442,6 +1444,7 @@ int main(void)
         }
         else
         {
+          had_pending_write = Recorder_HasPendingWrite();
           sd_ok = Recorder_Flush();
           FileBrowser_BuildSelectedPath(file_path, sizeof(file_path));
 
@@ -1453,12 +1456,22 @@ int main(void)
 
           if (yr == YMODEM_OK)
           {
+            /* A read proves the card recovered, but must not hide a failed
+               flush of pending recording data. */
+            if (had_pending_write == 0U)
+            {
+              sd_ok = 1U;
+            }
             AppModbus_FileXferSetState(4U, 0U);
           }
           else
           {
             uint16_t err = (yr == YMODEM_FILE_OPEN_ERROR || yr == YMODEM_FILE_READ_ERROR)
                                ? 0x0004U : 0x00FFU;
+            if (err == 0x0004U)
+            {
+              sd_ok = 0U;
+            }
             AppModbus_FileXferSetState(5U, err);
           }
         }

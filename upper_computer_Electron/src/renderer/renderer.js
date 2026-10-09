@@ -11,10 +11,13 @@ const CHANNEL_NAME_MAX_LEN = 12;
 
 const state = {
   connected: false,
+  connectionRevision: 0,
+  downloading: false,
   files: [],
   selectedFiles: new Set(),
   config: null,
 };
+let statusRequest = null;
 
 const titles = {
   dashboard: "总览",
@@ -41,6 +44,7 @@ function animateIntro() {
 }
 
 function switchView(name) {
+  if (name === "dashboard") refreshStatusAfterOperation();
   const current = $(".view.active");
   const next = $(`#${name}`);
   if (!next || current === next) return;
@@ -94,6 +98,9 @@ async function safe(label, fn) {
 
 function setConnected(connected, info) {
   state.connected = connected;
+  state.connectionRevision++;
+  statusRequest = null;
+  if (!connected) renderSystemBits(null);
   $("#railStatus").textContent = connected ? "已连接" : "未连接";
   $("#railStatus").className = `rail-status ${connected ? "online" : "offline"}`;
   $("#connectBtn").innerHTML = connected ? '<i class="icon-unplug"></i><span>断开</span>' : '<i class="icon-plug"></i><span>连接</span>';
@@ -156,7 +163,29 @@ async function connectToggle() {
 
 async function refreshStatus() {
   if (!guardConnected()) return;
-  const s = await safe("读取状态", () => window.plantApi.readStatus());
+  if (state.downloading) return;
+  if (statusRequest) return statusRequest;
+  const revision = state.connectionRevision;
+  const request = (async () => {
+    const s = await safe("读取状态", () => window.plantApi.readStatus());
+    if (state.connected && revision === state.connectionRevision) renderStatus(s);
+  })();
+  statusRequest = request;
+  try {
+    await request;
+  } finally {
+    if (statusRequest === request) statusRequest = null;
+  }
+}
+
+function refreshStatusAfterOperation() {
+  if (!state.connected || state.downloading) return Promise.resolve();
+  // Status failure is reported by safe(); it must not turn a completed read
+  // or download into a failed operation. No timer keeps the device awake.
+  return refreshStatus().catch(() => {});
+}
+
+function renderStatus(s) {
   $("#metricRun").textContent = s.running ? "运行中" : "已停止";
   $("#metricSd").textContent = s.sdTotalMb ? `${Math.max(s.sdTotalMb - s.sdFreeMb, 0)} / ${s.sdTotalMb} MB` : (s.sd ? "已就绪" : "未就绪");
   const pct = s.sdTotalMb ? Math.min(100, Math.round((s.sdTotalMb - s.sdFreeMb) * 100 / s.sdTotalMb)) : 0;
@@ -176,14 +205,14 @@ function batteryText(mv) {
 
 function renderSystemBits(s) {
   const items = [
-    ["AD7124", s.ad7124],
-    ["EEPROM", s.eeprom],
-    ["RTC", s.rtc],
-    ["SD", s.sd],
-    ["RUN", s.running],
+    ["AD7124", s?.ad7124],
+    ["EEPROM", s?.eeprom],
+    ["RTC", s?.rtc],
+    ["SD", s?.sd],
+    ["RUN", s?.running],
   ];
   $("#systemBits").innerHTML = items.map(([name, ok]) =>
-    `<span class="chip ${ok ? "ok" : "warn"}">${name} ${ok ? "正常" : "异常"}</span>`
+    `<span class="chip ${ok == null ? "" : ok ? "ok" : "warn"}">${name} ${ok == null ? "未读取" : ok ? "正常" : "异常"}</span>`
   ).join("");
   gsap.from("#systemBits .chip", { y: 8, autoAlpha: 0, stagger: 0.04 });
 }
@@ -280,6 +309,7 @@ async function readChannels() {
     }),
   ].join("");
   gsap.from("#channelResults .table-row", { y: 10, autoAlpha: 0, stagger: 0.035 });
+  await refreshStatusAfterOperation();
 }
 
 function buildConfigShell() {
@@ -557,6 +587,7 @@ async function writeConfig(save = false) {
   }
   await safe("写入配置", () => window.plantApi.writeConfig(config));
   toast(save ? "配置已写入并保存" : "配置已写入设备");
+  await refreshStatusAfterOperation();
 }
 
 async function refreshControls(showToast = true) {
@@ -585,6 +616,7 @@ async function openDir() {
   state.files = res.files;
   state.selectedFiles.clear();
   renderFiles();
+  if (res.status) renderStatus(res.status);
 }
 
 function renderFiles() {
@@ -616,6 +648,7 @@ function selectedFileObjects() {
 
 async function downloadFiles() {
   if (!guardConnected()) return;
+  if (state.downloading) return;
   const files = selectedFileObjects();
   if (!files.length) {
     toast("请先选择文件", "error");
@@ -628,7 +661,10 @@ async function downloadFiles() {
       return;
     }
   }
+  state.downloading = true;
   showDownload(true);
+  // Finish any status request before handing the serial port to YMODEM.
+  if (statusRequest) await statusRequest.catch(() => {});
   const off = window.plantApi.onDownloadProgress(updateDownloadProgress);
   try {
     const result = await safe("下载文件", () => window.plantApi.downloadFiles(files));
@@ -638,6 +674,8 @@ async function downloadFiles() {
   } finally {
     off();
     showDownload(false);
+    state.downloading = false;
+    await refreshStatusAfterOperation();
   }
 }
 
@@ -683,6 +721,9 @@ function bindEvents() {
   $$(".nav-item").forEach((btn) => btn.addEventListener("click", () => switchView(btn.dataset.view)));
   $("#refreshPorts").addEventListener("click", () => safe("刷新串口", refreshPorts));
   $("#connectBtn").addEventListener("click", connectToggle);
+  $("#refreshStatus").addEventListener("click", () => {
+    refreshStatus().catch(() => {});
+  });
   $("#startBtn").addEventListener("click", () => setRun(true));
   $("#pauseBtn").addEventListener("click", () => setRun(false));
   $("#saveConfig").addEventListener("click", () => command("SAVE_CONFIG"));
