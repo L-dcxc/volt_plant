@@ -59,6 +59,10 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define BAT_ADC_EN_Pin GPIO_PIN_1
 #define BAT_ADC_EN_GPIO_Port GPIOC
+#define ON_OFF_Pin GPIO_PIN_2
+#define ON_OFF_GPIO_Port GPIOC
+#define PWR_ON_Pin GPIO_PIN_3
+#define PWR_ON_GPIO_Port GPIOC
 #define ADC_PWR_EN_Pin GPIO_PIN_0
 #define ADC_PWR_EN_GPIO_Port GPIOA
 #define LED_GREEN_Pin GPIO_PIN_0
@@ -67,19 +71,13 @@ void Error_Handler(void);
 #define LED_YELLOW_GPIO_Port GPIOB
 #define LED_RED_Pin GPIO_PIN_2
 #define LED_RED_GPIO_Port GPIOB
-#define PWR_ON_Pin GPIO_PIN_12
-#define PWR_ON_GPIO_Port GPIOB
-#define ON_OFF_Pin GPIO_PIN_13
-#define ON_OFF_GPIO_Port GPIOB
-#define KEY_PWR_Pin GPIO_PIN_14
-#define KEY_PWR_GPIO_Port GPIOB
-#define KEY0_Pin GPIO_PIN_15
-#define KEY0_GPIO_Port GPIOB
-#define KEY0_EXTI_IRQn EXTI15_10_IRQn
 #define CTRL_OUT1_Pin GPIO_PIN_6
 #define CTRL_OUT1_GPIO_Port GPIOC
 #define CTRL_OUT2_Pin GPIO_PIN_7
 #define CTRL_OUT2_GPIO_Port GPIOC
+#define KEY0_Pin GPIO_PIN_8
+#define KEY0_GPIO_Port GPIOA
+#define KEY0_EXTI_IRQn EXTI9_5_IRQn
 #define CTRL_OUT3_Pin GPIO_PIN_11
 #define CTRL_OUT3_GPIO_Port GPIOA
 #define CTRL_OUT4_Pin GPIO_PIN_12

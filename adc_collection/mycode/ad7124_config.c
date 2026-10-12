@@ -19,11 +19,11 @@ static uint8_t GainToPgaBits(uint8_t gain)
 }
 
 /* Apply full configuration from AppConfigImage */
-HAL_StatusTypeDef AD7124_ApplyConfig(AD7124_HandleTypeDef *dev, const AppConfigImage *config)
+HAL_StatusTypeDef AD7124_ApplyConfig(AD7124_HandleTypeDef *dev, const AppConfigImage *config, uint8_t base_channel)
 {
   HAL_StatusTypeDef st;
   uint8_t setup_count = 0U;
-  uint8_t channel_to_setup[APP_CONFIG_CHANNEL_COUNT];
+  uint8_t channel_to_setup[APP_CONFIG_CHANNELS_PER_ADC];
 
   /* Setup allocation: map unique (gain, filter_mode) combinations to SETUP_0..7 */
   typedef struct {
@@ -39,10 +39,14 @@ HAL_StatusTypeDef AD7124_ApplyConfig(AD7124_HandleTypeDef *dev, const AppConfigI
   if (dev == NULL || config == NULL)
     return HAL_ERROR;
 
+  /* base_channel must leave a full 16-channel window inside the config image */
+  if (((uint16_t)base_channel + APP_CONFIG_CHANNELS_PER_ADC) > APP_CONFIG_CHANNEL_COUNT)
+    return HAL_ERROR;
+
   /* Pass 1: Allocate SETUPs for unique (gain, filter_mode) combinations */
-  for (uint8_t ch = 0U; ch < APP_CONFIG_CHANNEL_COUNT; ch++)
+  for (uint8_t ch = 0U; ch < APP_CONFIG_CHANNELS_PER_ADC; ch++)
   {
-    const AppChannelConfig *ch_cfg = &config->channels[ch];
+    const AppChannelConfig *ch_cfg = &config->channels[base_channel + ch];
 
     if (ch_cfg->enable == 0U)
     {
@@ -82,13 +86,13 @@ HAL_StatusTypeDef AD7124_ApplyConfig(AD7124_HandleTypeDef *dev, const AppConfigI
     uint8_t pga_bits = GainToPgaBits(setups[s].gain);
 
     /* CONFIG: Bipolar=1, REF_SEL=00 (REFIN1 外部基准), PGA=pga_bits,
-       所有 buffer 关闭。
-       与 AD7124_ConfigAllSingleEnded (ad7124.c) 的 0x0800 对齐——这是
-       之前测试 16 通道刷新已验证能稳定工作的组合。
-       不开 AIN_BUFx 是因为：buffer 启用会把输入范围压到
-       [AVSS+100mV, AVDD-100mV]，悬空 / 接近 0V 的输入会被推到轨饱和
-       并出现 settling 不收敛、数据漂移到 0x95xxxx 量级的异常值。 */
-    uint16_t config_val = 0x0800U | pga_bits;
+       AIN_BUFP+AIN_BUFM 开启（0x0060）—— 硬件要求单端/差分都开输入缓冲，
+       以耐受前端 1k 串阻的源阻抗（无缓冲时源阻抗误差在差分上会翻倍，
+       表现为差分比单端还差）。
+       注意：开缓冲后输入共模被限制在 [AVSS+0.1V, AVDD-0.1V]。单端 AINM=AVSS
+       的通道负脚落在 0V 近负轨——这正是之前关闭缓冲的原因，换板后务必实测
+       确认近 0V 输入不会 settling 不收敛/饱和（旧板曾漂到 0x95xxxx）。 */
+    uint16_t config_val = 0x0860U | pga_bits;
 
     st = AD7124_WriteRegister(dev, (uint8_t)(AD7124_REG_CONFIG_0 + s), config_val, 2U);
     if (st != HAL_OK)
@@ -102,9 +106,9 @@ HAL_StatusTypeDef AD7124_ApplyConfig(AD7124_HandleTypeDef *dev, const AppConfigI
   }
 
   /* Pass 3: Write CHANNEL registers */
-  for (uint8_t ch = 0U; ch < APP_CONFIG_CHANNEL_COUNT; ch++)
+  for (uint8_t ch = 0U; ch < APP_CONFIG_CHANNELS_PER_ADC; ch++)
   {
-    const AppChannelConfig *ch_cfg = &config->channels[ch];
+    const AppChannelConfig *ch_cfg = &config->channels[base_channel + ch];
     uint16_t channel_val = 0x0000U;
 
     if (ch_cfg->enable != 0U)

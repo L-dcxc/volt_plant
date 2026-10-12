@@ -9,6 +9,7 @@ const api = {
   readClock: () => ipcRenderer.invoke("device:clock:read"),
   writeClock: (dto) => ipcRenderer.invoke("device:clock:write", dto),
   setRun: (running) => ipcRenderer.invoke("device:run", running),
+  setChannelCount: (n) => ipcRenderer.invoke("device:setChannelCount", n),
   command: (name) => ipcRenderer.invoke("device:command", name),
   readChannels: (channels) => ipcRenderer.invoke("device:channels:read", channels),
   readConfig: () => ipcRenderer.invoke("device:config:read"),

@@ -72,8 +72,11 @@ uint8_t AD7124_StatusToChannel(uint8_t status);
 int32_t AD7124_BipolarCodeToSigned(uint32_t raw_data);
 int32_t AD7124_BipolarCodeToMicrovolts(uint32_t raw_data, int32_t vref_mv, uint8_t gain);
 
-/* New: Apply full configuration from AppConfigImage */
-HAL_StatusTypeDef AD7124_ApplyConfig(AD7124_HandleTypeDef *dev, const AppConfigImage *config);
+/* New: Apply full configuration from AppConfigImage. base_channel is the
+   logical-channel offset this device covers: 0 for ADC1 (channels 0..15),
+   16 for ADC2 (channels 16..31). The device is always programmed with its
+   own 16 physical channel registers (AINP/AINM are per-device AIN0..15). */
+HAL_StatusTypeDef AD7124_ApplyConfig(AD7124_HandleTypeDef *dev, const AppConfigImage *config, uint8_t base_channel);
 
 #ifdef __cplusplus
 }

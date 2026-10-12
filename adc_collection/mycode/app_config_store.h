@@ -9,9 +9,9 @@
 extern "C" {
 #endif
 
-#define APP_CONFIG_STORE_SLOT_SIZE_BYTES  1024U
+#define APP_CONFIG_STORE_SLOT_SIZE_BYTES  2048U   /* 32-ch image ~1.3KB; 1024 no longer fits */
 #define APP_CONFIG_STORE_SLOT_A_ADDR      0x0000U
-#define APP_CONFIG_STORE_SLOT_B_ADDR      0x0400U
+#define APP_CONFIG_STORE_SLOT_B_ADDR      0x0800U   /* moved from 0x0400 for the larger slot */
 
 typedef enum
 {

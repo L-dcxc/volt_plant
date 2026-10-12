@@ -130,8 +130,11 @@ uint8_t AppConfigStore_IsCrcValid(const AppConfigImage *config)
 
 HAL_StatusTypeDef AppConfigStore_Load(AppConfigStore *store, AppConfigImage *config)
 {
-  AppConfigImage slot_a;
-  AppConfigImage slot_b;
+  /* static (not on stack): each is a full ~1.3 KB config image. With the
+     32-channel image, two on the stack overflowed the 1 KB MSP and corrupted
+     RAM (bricking I2C/EEPROM). .bss is ample and these are non-reentrant. */
+  static AppConfigImage slot_a;
+  static AppConfigImage slot_b;
   uint8_t slot_a_valid;
   uint8_t slot_b_valid;
 
@@ -201,7 +204,7 @@ HAL_StatusTypeDef AppConfigStore_Save(AppConfigStore *store, AppConfigImage *con
 {
   AppConfigStoreSlot target_slot;
   HAL_StatusTypeDef status;
-  AppConfigImage verify_config;
+  static AppConfigImage verify_config;  /* static: avoid ~1.3 KB stack frame (see Load) */
 
   if ((store == NULL) || (config == NULL))
   {

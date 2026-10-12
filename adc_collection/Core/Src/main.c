@@ -83,9 +83,11 @@
 
 /* USER CODE BEGIN PV */
 static AD7124_HandleTypeDef had7124;
+static AD7124_HandleTypeDef had7124_2;   /* second AD7124 on SPI2 (ADC2, channels 16..31) */
 static AppConfigStore app_config_store;
 static AppConfigImage app_config;
 static uint8_t ad7124_ready = 0U;
+static uint8_t ad7124_2_ready = 0U;   /* 1 when ADC2 is detected + configured */
 static uint8_t ad7124_loop_print_enable = 0U;
 static uint8_t storage_boot_test_enable = 1U;
 static uint32_t ad7124_print_tick = 0U;
@@ -93,6 +95,7 @@ static uint32_t led_blink_tick = 0U;
 static uint8_t modbus_enabled = 1U;
 static uint8_t modbus_rx_armed = 0U;
 static uint8_t eeprom_ok = 0U;
+static uint16_t boot_eeprom_diag = 0U;   /* diag: boot EEPROM fail step(0x1/2/3xxx)+I2C ErrorCode, published to ERR_CODE 0x0053 */
 static uint8_t rtc_ok = 0U;
 static uint8_t sd_ok = 0U;
 static uint8_t adc_powered = 0U;
@@ -134,6 +137,8 @@ static void AppUart1_EnableStopWakeup(void);
 static void AppUart1_RecoverAfterStop(void);
 static void AppModbusRx_SetArmed(uint8_t armed);
 static HAL_StatusTypeDef AppAd7124_EnsureReady(void);
+static void AppAd7124_2_TryBringUp(void);
+static uint8_t AppScanOneAdc(AD7124_HandleTypeDef *dev, uint8_t base_channel);
 static void AppAd7124_PowerOffForSleep(void);
 static void AppPeripherals_DeInitForStop(void);
 static void AppPeripherals_ReInitAfterStop(void);
@@ -212,7 +217,16 @@ static uint8_t AppModbus_ReconfigureAd7124(void)
   {
     return 1U;
   }
-  return (AD7124_ApplyConfig(&had7124, &app_config) == HAL_OK) ? 0U : 1U;
+  if (AD7124_ApplyConfig(&had7124, &app_config, 0U) != HAL_OK)
+  {
+    return 1U;
+  }
+  if ((ad7124_2_ready != 0U) &&
+      (AD7124_ApplyConfig(&had7124_2, &app_config, APP_CONFIG_CHANNELS_PER_ADC) != HAL_OK))
+  {
+    return 1U;
+  }
+  return 0U;
 }
 
 static HAL_StatusTypeDef AppAd7124_EnsureReady(void)
@@ -243,8 +257,20 @@ static HAL_StatusTypeDef AppAd7124_EnsureReady(void)
     return (st == HAL_OK) ? HAL_ERROR : st;
   }
 
-  st = AD7124_ApplyConfig(&had7124, &app_config);
+  st = AD7124_ApplyConfig(&had7124, &app_config, 0U);
   ad7124_ready = (st == HAL_OK) ? 1U : 0U;
+
+  /* ADC2 is optional: bring it up when ADC1 is good. A missing or
+     unresponsive ADC2 just leaves ad7124_2_ready = 0 (16-channel mode). */
+  if (ad7124_ready != 0U)
+  {
+    AppAd7124_2_TryBringUp();
+  }
+  else
+  {
+    ad7124_2_ready = 0U;
+  }
+
   return st;
 }
 
@@ -256,8 +282,93 @@ static void AppAd7124_PowerOffForSleep(void)
   }
 
   (void)HAL_SPI_DeInit(&hspi1);
+  (void)HAL_SPI_DeInit(&hspi2);
   AD7124_BoardPowerOff();
   adc_powered = 0U;
+  ad7124_2_ready = 0U;
+}
+
+/* Detect + configure ADC2 on SPI2. Optional: on any failure ad7124_2_ready
+   stays 0 and the device keeps running as a 16-channel unit. */
+static void AppAd7124_2_TryBringUp(void)
+{
+  HAL_StatusTypeDef st2;
+  uint8_t id2 = 0U;
+
+  ad7124_2_ready = 0U;
+
+  MX_SPI2_Init();
+  if (AD7124_Init(&had7124_2, &hspi2) != HAL_OK)
+  {
+    return;
+  }
+  st2 = AD7124_ReadID(&had7124_2, &id2);
+  if ((st2 != HAL_OK) || (AD7124_IsDeviceID(id2) == 0U))
+  {
+    return;
+  }
+  st2 = AD7124_ApplyConfig(&had7124_2, &app_config, APP_CONFIG_CHANNELS_PER_ADC);
+  ad7124_2_ready = (st2 == HAL_OK) ? 1U : 0U;
+}
+
+/* Scan one AD7124 for its enabled channels, mapping the device status
+   channel (0..15) to logical base_channel+ch. Modbus is polled between
+   reads so the host stays responsive during the scan. Returns #samples. */
+static uint8_t AppScanOneAdc(AD7124_HandleTypeDef *dev, uint8_t base_channel)
+{
+  uint8_t enabled_count = 0U;
+  uint8_t samples_read = 0U;
+  uint8_t k;
+
+  for (k = 0U; k < APP_CONFIG_CHANNELS_PER_ADC; k++)
+  {
+    if (app_config.channels[base_channel + k].enable != 0U)
+    {
+      enabled_count++;
+    }
+  }
+
+  while ((samples_read < enabled_count) && (samples_read < APP_CONFIG_CHANNELS_PER_ADC))
+  {
+    uint32_t raw_data = 0U;
+    int32_t signed_data = 0;
+    int32_t input_uv = 0;
+    uint8_t sample_status = 0U;
+    uint8_t logical_channel;
+    uint8_t ch_gain;
+    HAL_StatusTypeDef sample_st;
+
+    if (modbus_enabled != 0U)
+    {
+      AppModbus_UpdateSystemStatus(ad7124_ready, eeprom_ok, rtc_ok, sd_ok, app_config.run_enable);
+      ModbusRtu_Poll();
+    }
+
+    sample_st = AD7124_ReadSample(dev, &raw_data, &signed_data,
+                                  &sample_status, APP_AD7124_SAMPLE_TIMEOUT_MS);
+    if (sample_st != HAL_OK)
+    {
+      break;
+    }
+
+    logical_channel = (uint8_t)(base_channel + AD7124_StatusToChannel(sample_status));
+    ch_gain = (app_config.channels[logical_channel].gain != 0U) ?
+              app_config.channels[logical_channel].gain : AD7124_DEFAULT_GAIN;
+    input_uv = AD7124_BipolarCodeToMicrovolts(raw_data,
+                                              (int32_t)app_config.adc_vref_mv, ch_gain);
+    (void)signed_data;
+
+    if (modbus_enabled != 0U)
+    {
+      AppModbus_UpdateChannelData(logical_channel, raw_data, input_uv);
+    }
+    Recorder_OnChannelSample(logical_channel, input_uv);
+
+    samples_read++;
+    HAL_IWDG_Refresh(&hiwdg);
+  }
+
+  return samples_read;
 }
 
 static void AppPeripherals_DeInitForStop(void)
@@ -736,12 +847,12 @@ static void AppEnterStop2Slice(uint32_t sleep_seconds)
   AppPeripherals_DeInitForStop();
 
   /* Clear any stale EXTI pending bit for KEY0 before entering STOP2. If a
-     glitch already latched a pending interrupt on PB15 (line 15), wake-up
+     glitch already latched a pending interrupt on PA8 (line 8), wake-up
      would re-enter HAL_GPIO_EXTI_Callback immediately and look like a real
      press. We also clear the NVIC pending so a queued interrupt from before
      the last loop iteration doesn't fire spuriously on resume. */
   __HAL_GPIO_EXTI_CLEAR_IT(KEY0_Pin);
-  HAL_NVIC_ClearPendingIRQ(EXTI15_10_IRQn);
+  HAL_NVIC_ClearPendingIRQ(KEY0_EXTI_IRQn);
 
   (void)HAL_RTCEx_DeactivateWakeUpTimer(&hrtc);
   stop2_rtc_wakeup = 0U;
@@ -934,6 +1045,7 @@ int main(void)
   MX_USART3_UART_Init();
   MX_FATFS_Init();
   MX_RTC_Init();
+  MX_SPI2_Init();
   /* USER CODE BEGIN 2 */
   /* IWDG fully removed from CubeMX. All HAL_IWDG_Refresh(&hiwdg) calls are
      stubbed to no-ops via the macro in USER CODE BEGIN PD. */
@@ -980,6 +1092,7 @@ int main(void)
     if (config_status != HAL_OK)
     {
       /* printf("[EEPROM] not ready, HAL status = %d\r\n", (int)config_status); */
+      boot_eeprom_diag = (uint16_t)(0x1000U | (hi2c2.ErrorCode & 0x0FFFU));
       AppConfig_LoadDefaults(&app_config);
       /* printf("[CONFIG] using RAM defaults only\r\n"); */
     }
@@ -987,6 +1100,10 @@ int main(void)
     {
       /* printf("[EEPROM] device ready\r\n"); */
       config_status = AppConfigStore_Load(&app_config_store, &app_config);
+      if ((hi2c2.ErrorCode != 0U) && (boot_eeprom_diag == 0U))
+      {
+        boot_eeprom_diag = (uint16_t)(0x2000U | (hi2c2.ErrorCode & 0x0FFFU));
+      }
       if (config_status != HAL_OK)
       {
         /* printf("[CONFIG] load error, HAL status = %d\r\n", (int)config_status); */
@@ -997,6 +1114,10 @@ int main(void)
         /* printf("[CONFIG] no valid EEPROM config, writing defaults...\r\n"); */
         HAL_IWDG_Refresh(&hiwdg);
         config_status = AppConfigStore_SaveDefaults(&app_config_store, &app_config);
+        if ((config_status != HAL_OK) && (boot_eeprom_diag == 0U))
+        {
+          boot_eeprom_diag = (uint16_t)(0x3000U | (hi2c2.ErrorCode & 0x0FFFU));
+        }
         (void)config_status;
         /* if (config_status == HAL_OK)
         {
@@ -1115,11 +1236,13 @@ int main(void)
       ad_status = AD7124_ReadID(&had7124, &ad7124_id);
       if ((ad_status == HAL_OK) && (AD7124_IsDeviceID(ad7124_id) != 0U))
       {
-        cfg_status = AD7124_ApplyConfig(&had7124, &app_config);
+        cfg_status = AD7124_ApplyConfig(&had7124, &app_config, 0U);
         if (cfg_status == HAL_OK)
         {
           ad7124_ready = 1U;
           printf("[AD7124] config applied from EEPROM (per-channel mode/gain/filter)\r\n");
+          AppAd7124_2_TryBringUp();
+          printf("[AD7124] ADC2 %s\r\n", (ad7124_2_ready != 0U) ? "detected" : "absent (16-ch mode)");
         }
         else
         {
@@ -1170,6 +1293,12 @@ int main(void)
 
     AppModbus_Init(&app_config, &app_config_store);
     AppModbus_SetReconfigureCallback(AppModbus_ReconfigureAd7124);
+    /* Diagnostic: surface any boot-time EEPROM failure (step + I2C ErrorCode)
+       in the ERR_CODE register (0x0053) shown on the dashboard. */
+    if (boot_eeprom_diag != 0U)
+    {
+      AppModbus_SetErrorCode(boot_eeprom_diag);
+    }
     /* Publish the boot checks before the first host request, even when the
        first scan is minutes away or waiting for a configured start time. */
     AppModbus_UpdateSystemStatus(ad7124_ready, eeprom_ok, rtc_ok, sd_ok, app_config.run_enable);
@@ -1275,9 +1404,7 @@ int main(void)
 
       if ((start_reached != 0U) && ((HAL_GetTick() - sample_tick) >= interval_ms))
       {
-        uint8_t round_idx;
-        uint8_t enabled_count = 0U;
-        uint8_t samples_read = 0U;
+        uint8_t samples_read;
         uint8_t need_sd = Recorder_NextScanWillFlush();
         HAL_StatusTypeDef adc_wake_status;
 
@@ -1307,67 +1434,13 @@ int main(void)
 
         sample_tick = HAL_GetTick();
 
-        for (round_idx = 0U; round_idx < APP_CONFIG_CHANNEL_COUNT; round_idx++)
+        /* Scan ADC1 (logical channels 0..15); then ADC2 (16..31) when it is
+           present. A missing ADC2 simply contributes no samples. */
+        samples_read = AppScanOneAdc(&had7124, 0U);
+        if (ad7124_2_ready != 0U)
         {
-          if (app_config.channels[round_idx].enable != 0U)
-          {
-            enabled_count++;
-          }
-        }
-
-        while (samples_read < enabled_count && samples_read < 32U)
-        {
-          uint32_t raw_data = 0U;
-          int32_t signed_data = 0;
-          int32_t input_uv = 0;
-          uint8_t sample_status = 0U;
-          uint8_t sample_channel = 0U;
-          HAL_StatusTypeDef sample_st;
-
-          if (modbus_enabled != 0U)
-          {
-            AppModbus_UpdateSystemStatus(ad7124_ready, eeprom_ok, rtc_ok, sd_ok, app_config.run_enable);
-            ModbusRtu_Poll();
-          }
-
-          /* Per-channel timeout: AD7124 FILTER 当前固定 Sinc4 + FS=64
-             (~300 SPS)，单通道 settling ~13ms，100ms 留 ~7× 余量。 */
-          sample_st = AD7124_ReadSample(&had7124,
-                                         &raw_data,
-                                         &signed_data,
-                                         &sample_status,
-                                         APP_AD7124_SAMPLE_TIMEOUT_MS);
-          if (sample_st != HAL_OK)
-          {
-            break;
-          }
-
-          sample_channel = AD7124_StatusToChannel(sample_status);
-
-          uint8_t ch_gain;
-          if (sample_channel < APP_CONFIG_CHANNEL_COUNT &&
-              app_config.channels[sample_channel].gain != 0U)
-          {
-            ch_gain = app_config.channels[sample_channel].gain;
-          }
-          else
-          {
-            ch_gain = AD7124_DEFAULT_GAIN;
-          }
-
-          input_uv = AD7124_BipolarCodeToMicrovolts(raw_data,
-                                                    (int32_t)app_config.adc_vref_mv,
-                                                    ch_gain);
-          (void)signed_data; /* still computed by ReadSample, no longer printed */
-
-          if (modbus_enabled != 0U)
-          {
-            AppModbus_UpdateChannelData(sample_channel, raw_data, input_uv);
-          }
-          Recorder_OnChannelSample(sample_channel, input_uv);
-
-          samples_read++;
-          HAL_IWDG_Refresh(&hiwdg);
+          samples_read = (uint8_t)(samples_read +
+                                   AppScanOneAdc(&had7124_2, APP_CONFIG_CHANNELS_PER_ADC));
         }
 
         if (samples_read == 0U)

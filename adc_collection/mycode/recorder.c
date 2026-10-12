@@ -11,7 +11,7 @@
 /* DAT format currently shares the CSV layout (extension only). Define a
    binary record format here once the spec stabilises. */
 
-#define RECORDER_LINE_BUF_SIZE   384U
+#define RECORDER_LINE_BUF_SIZE   768U   /* 32 channels per CSV row (was 384 for 16) */
 #define RECORDER_PATH_BUF_SIZE   32U
 #define RECORDER_NAME_BUF_SIZE   16U
 #define RECORDER_SD_RETRY_MS     5000U

@@ -38,6 +38,9 @@ void AppModbus_ClearChannelData(void);
 void AppModbus_UpdateSystemStatus(uint8_t ad7124_ready, uint8_t eeprom_ok,
                                    uint8_t rtc_ok, uint8_t sd_ok, uint8_t running);
 
+/* Diagnostic: force the ERR_CODE register (input reg 0x0053) to a value. */
+void AppModbus_SetErrorCode(uint16_t code);
+
 /* Update last sample timestamp */
 void AppModbus_UpdateSampleTimestamp(void);
 

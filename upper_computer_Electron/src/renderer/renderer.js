@@ -8,6 +8,7 @@ const CONFIG_TIME_MAX_SEC = 86400;
 const CONFIG_I32_LIMIT = 2000000000;
 const CONFIG_FILE_SPAN_MAX_DAYS = 365;
 const CHANNEL_NAME_MAX_LEN = 12;
+const CHANNELS_PER_ADC = 16;
 
 const state = {
   connected: false,
@@ -16,6 +17,7 @@ const state = {
   files: [],
   selectedFiles: new Set(),
   config: null,
+  channelCount: 16,
 };
 let statusRequest = null;
 
@@ -109,6 +111,22 @@ function setConnected(connected, info) {
   $("#metricCfg").textContent = info ? hex(info.cfgVersion) : "--";
 }
 
+function updateChannelMode(n) {
+  state.channelCount = n === 32 ? 32 : 16;
+  const btn = $("#channelModeToggle");
+  if (btn) btn.textContent = `${state.channelCount} 通道`;
+  buildChannelChecks();
+  buildConfigShell();
+}
+
+async function toggleChannelMode() {
+  if (!guardConnected()) return;
+  const next = state.channelCount === 32 ? 16 : 32;
+  await safe("切换通道协议", () => window.plantApi.setChannelCount(next));
+  updateChannelMode(next);
+  toast(`已切换为 ${next} 通道协议，请重新读取配置/通道`);
+}
+
 function hex(value, width = 4) {
   return `0x${Number(value || 0).toString(16).toUpperCase().padStart(width, "0")}`;
 }
@@ -157,6 +175,7 @@ async function connectToggle() {
     slave: Number($("#slaveInput").value),
   }));
   setConnected(true, info);
+  updateChannelMode(info.channelCount || 16);
   toast(`连接成功，设备 ${hex(info.deviceId, 8)}`);
   await refreshStatus();
 }
@@ -286,7 +305,7 @@ async function writeClockFromDate(date) {
 }
 
 function buildChannelChecks() {
-  $("#channelChecks").innerHTML = Array.from({ length: 16 }, (_, ch) =>
+  $("#channelChecks").innerHTML = Array.from({ length: state.channelCount }, (_, ch) =>
     `<label><input type="checkbox" class="ch-check" value="${ch}">CH${ch}</label>`
   ).join("");
 }
@@ -316,7 +335,7 @@ function buildConfigShell() {
   $("#cfgGain").innerHTML = GAIN_VALUES.map((g) => `<option value="${g}">${g}</option>`).join("");
   $("#controlCards").innerHTML = Array.from({ length: 4 }, (_, index) => controlCard(index)).join("");
   const header = `<div class="config-row header"><span>通道</span><span>名称</span><span>使能</span><span>模式</span><span>增益</span><span>量程uV</span><span>偏移uV</span><span>修正ppm</span><span>预热ms</span><span>输入</span></div>`;
-  const rows = Array.from({ length: 16 }, (_, ch) => configRow(ch)).join("");
+  const rows = Array.from({ length: state.channelCount }, (_, ch) => configRow(ch)).join("");
   $("#configChannels").innerHTML = header + rows;
   $$(".cfg-mode").forEach((el) => el.addEventListener("change", refreshPairStates));
   $$(".force-btn").forEach((btn) => btn.addEventListener("click", () => forceControl(btn)));
@@ -363,7 +382,7 @@ function configRow(ch) {
     <input class="cfg-offset" type="number" min="-${CONFIG_I32_LIMIT}" max="${CONFIG_I32_LIMIT}" value="0">
     <input class="cfg-scale" type="number" min="-${CONFIG_I32_LIMIT}" max="${CONFIG_I32_LIMIT}" value="1000000">
     <input class="cfg-warmup" type="number" min="0" max="${CONFIG_I32_LIMIT}" value="0">
-    <span class="cfg-input-label">AIN${ch}/AVSS</span>
+    <span class="cfg-input-label">AIN${ch % CHANNELS_PER_ADC}/AVSS</span>
   </div>`;
 }
 
@@ -373,17 +392,17 @@ function refreshPairStates() {
     row.style.opacity = "";
     row.removeAttribute("aria-disabled");
     row.querySelectorAll("input, select").forEach((el) => { el.disabled = false; });
-    row.querySelector(".cfg-input-label").textContent = `AIN${row.dataset.ch}/AVSS`;
+    row.querySelector(".cfg-input-label").textContent = `AIN${row.dataset.ch % CHANNELS_PER_ADC}/AVSS`;
   });
 
   const occupied = new Set();
-  for (let ch = 0; ch < 16; ch++) {
+  for (let ch = 0; ch < state.channelCount; ch++) {
     const row = $(`.config-row[data-ch="${ch}"]`);
     const mode = row.querySelector(".cfg-mode").value;
     const label = row.querySelector(".cfg-input-label");
     if (mode === "1") {
       const pair = ch % 2 === 0 ? ch + 1 : ch - 1;
-      label.textContent = `AIN${ch}/AIN${pair}`;
+      label.textContent = `AIN${ch % CHANNELS_PER_ADC}/AIN${pair % CHANNELS_PER_ADC}`;
       occupied.add(pair);
     }
   }
@@ -753,6 +772,7 @@ function bindEvents() {
   $("#downloadFiles").addEventListener("click", downloadFiles);
   $("#deleteFiles").addEventListener("click", deleteFiles);
   $("#cancelDownload").addEventListener("click", () => window.plantApi.cancelDownload());
+  $("#channelModeToggle").addEventListener("click", () => toggleChannelMode().catch(() => {}));
 }
 
 function boot() {

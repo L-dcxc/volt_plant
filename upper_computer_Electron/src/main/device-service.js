@@ -10,6 +10,7 @@ class DeviceService {
   constructor() {
     this.client = new ModbusRtuClient();
     this.cancelDownload = false;
+    this.channelCount = 16; // auto-detected on connect; manual override via setChannelCount
   }
 
   register() {
@@ -21,6 +22,7 @@ class DeviceService {
     ipcMain.handle("device:clock:read", () => this.readClock());
     ipcMain.handle("device:clock:write", (_event, dto) => this.writeClock(dto));
     ipcMain.handle("device:run", (_event, running) => this.setRun(running));
+    ipcMain.handle("device:setChannelCount", (_event, n) => this.setChannelCount(n));
     ipcMain.handle("device:command", (_event, cmd) => this.command(cmd));
     ipcMain.handle("device:channels:read", (_event, channels) => this.readChannels(channels));
     ipcMain.handle("device:config:read", () => this.readConfig());
@@ -43,7 +45,27 @@ class DeviceService {
       settleMs: 500,
       ...opts,
     });
-    return this.readDeviceInfo();
+    const info = await this.readDeviceInfo();
+    this.channelCount = await this._detectChannelCount();
+    return { ...info, channelCount: this.channelCount };
+  }
+
+  // Read the device's CHANNEL_COUNT register (0x0004). New 32-ch firmware
+  // returns 16/32; old 16-ch firmware has no such register and replies with a
+  // Modbus exception, so we fall back to 16.
+  async _detectChannelCount() {
+    try {
+      const r = await this.client.readHolding(reg.HR.CHANNEL_COUNT_REG, 1);
+      return r[0] === 32 ? 32 : 16;
+    } catch (err) {
+      return 16;
+    }
+  }
+
+  // Manual override from the UI toggle.
+  async setChannelCount(n) {
+    this.channelCount = Number(n) === 32 ? 32 : 16;
+    return this.channelCount;
   }
 
   async disconnect() {
@@ -111,12 +133,14 @@ class DeviceService {
   }
 
   async readChannels(channels) {
-    const validMask = (await this.client.readInput(reg.IR.CH_VALID_MASK, 1))[0];
+    const validLow = (await this.client.readInput(reg.IR.CH_VALID_MASK, 1))[0];
+    const validHigh = (await this.client.readInput(reg.IR.CH_VALID_MASK_HI, 1))[0];
+    const validMask = (((validHigh & 0xffff) << 16) | (validLow & 0xffff)) >>> 0;
     const displayMask = await this._readChannelDisplayMask();
     const rows = [];
     for (const ch of channels) {
       const data = await this.client.readInput(reg.channelDataBase(ch), 4);
-      const valid = Boolean((validMask & displayMask) & (1 << ch));
+      const valid = ((validMask & displayMask) & (1 << ch)) !== 0;
       rows.push({
         ch,
         name: await this._readChannelName(ch),
@@ -132,7 +156,7 @@ class DeviceService {
     const sys = await this.client.readHolding(reg.HR.MODBUS_ADDR, 16);
     const adc = await this.client.readHolding(reg.HR.ADC_VREF_MV, 3);
     const channels = [];
-    for (let ch = 0; ch < reg.CHANNEL.COUNT; ch++) {
+    for (let ch = 0; ch < this.channelCount; ch++) {
       const cfgRegs = await this.client.readHolding(reg.channelBase(ch), reg.CHANNEL.REG_COUNT);
       channels.push({
         ...this._decodeChannel(ch, cfgRegs),
@@ -295,18 +319,21 @@ class DeviceService {
     let enabledMask = 0;
     let occupiedMask = 0;
 
-    for (let ch = 0; ch < reg.CHANNEL.COUNT; ch++) {
+    for (let ch = 0; ch < this.channelCount; ch++) {
       const r = await this.client.readHolding(reg.channelBase(ch), 2);
       const [enable, mode] = reg.unpackBytes(r[reg.CHANNEL.OFF_FLAGS]);
       const [_pos, neg] = reg.unpackBytes(r[reg.CHANNEL.OFF_INPUTS]);
       if (!enable) continue;
       enabledMask |= (1 << ch);
-      if (mode === 1 && neg >= 0 && neg < reg.CHANNEL.COUNT) {
-        occupiedMask |= (1 << neg);
+      if (mode === 1 && neg >= 0 && neg < reg.CHANNEL.CHANNELS_PER_ADC) {
+        // neg is a per-ADC AIN (0..15); the occupied logical channel is this
+        // channel's ADC base + neg.
+        const base = ch < reg.CHANNEL.CHANNELS_PER_ADC ? 0 : reg.CHANNEL.CHANNELS_PER_ADC;
+        occupiedMask |= (1 << (base + neg));
       }
     }
 
-    return enabledMask & ~occupiedMask;
+    return (enabledMask & ~occupiedMask) >>> 0;
   }
 
   async _readChannelName(ch) {
@@ -360,8 +387,11 @@ class DeviceService {
 
   _encodeChannel(ch) {
     const mode = Number(ch.mode);
-    const pos = ch.ch;
-    const neg = mode === 1 ? (ch.ch % 2 === 0 ? ch.ch + 1 : ch.ch - 1) : reg.ADC_INPUT_AVSS;
+    const perAdc = reg.CHANNEL.CHANNELS_PER_ADC;
+    // positive/negative inputs are per-ADC AIN indices (0..15).
+    const pos = ch.ch % perAdc;
+    const negLogical = ch.ch % 2 === 0 ? ch.ch + 1 : ch.ch - 1;
+    const neg = mode === 1 ? (negLogical % perAdc) : reg.ADC_INPUT_AVSS;
     const regs = new Array(reg.CHANNEL.REG_COUNT).fill(0);
     regs[reg.CHANNEL.OFF_FLAGS] = reg.packBytes(ch.enable ? 1 : 0, mode);
     regs[reg.CHANNEL.OFF_INPUTS] = reg.packBytes(pos, neg);

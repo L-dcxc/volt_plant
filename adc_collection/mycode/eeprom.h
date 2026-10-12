@@ -13,7 +13,7 @@ extern "C" {
 #define EEPROM_24C64_SIZE_BYTES           8192U
 #define EEPROM_24C64_PAGE_SIZE_BYTES      32U
 #define EEPROM_24C64_MEM_ADDR_SIZE        I2C_MEMADD_SIZE_16BIT
-#define EEPROM_DEFAULT_TIMEOUT_MS         100U
+#define EEPROM_DEFAULT_TIMEOUT_MS         500U   /* 32-ch config image is ~1.3KB; a full read at 100kHz I2C takes ~120ms, so 100ms was too short and timed out, locking the bus */
 #define EEPROM_READY_TRIALS               20U
 
 typedef struct

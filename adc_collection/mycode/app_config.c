@@ -178,7 +178,7 @@ void AppConfig_LoadDefaults(AppConfigImage *config)
     AppConfig_SetChannel(&config->channels[i],
                          1U,
                          APP_CHANNEL_MODE_SINGLE_ENDED,
-                         (uint8_t)i,
+                         (uint8_t)(i % APP_CONFIG_CHANNELS_PER_ADC),
                          APP_ADC_INPUT_AVSS,
                          APP_SENSOR_TYPE_CUSTOM,
                          APP_CONFIG_2V_RANGE_UV,

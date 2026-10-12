@@ -92,3 +92,13 @@ exe生成
 
 1009
 修复系统标志位异常问题
+
+10/10
+新方案：16通道扩32通道，新增第二颗AD7124(ADC2)，走独立SPI2（CS#接地，RDY靠SPI轮询，同ADC1）
+引脚迁移(配合硬件改板)：ON_OFF PB13→PC2，PWR_ON PB12→PC3，KEY0 PB15→PA8
+KEY_PWR(PB14)取消MCU脚，改作SPI2_MISO（电源按键功能不变，MCU靠ON_OFF/PWR_ON控制自锁）
+CubeMX新增SPI2(PB13/14/15, Mode3, 1.25M)，KEY0中断随之改到EXTI9_5
+
+10/12
+上位机新增16/32通道版本检测
+打开AIN输入缓冲器

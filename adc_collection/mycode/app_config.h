@@ -8,16 +8,18 @@ extern "C" {
 #endif
 
 #define APP_CONFIG_MAGIC              0x504C414EUL  /* "PLAN": plant logger configuration image */
-#define APP_FIRMWARE_VERSION          0x0101U       /* BCD-style: 0x0101 = v1.01 */
-#define APP_CONFIG_VERSION            3U
-#define APP_CONFIG_CHANNEL_COUNT      16U
+#define APP_FIRMWARE_VERSION          0x0201U       /* BCD-style: 0x0101 = v1.01 */
+#define APP_CONFIG_VERSION            4U       /* bumped from 3: 32-ch image layout */
+#define APP_CONFIG_CHANNEL_COUNT      32U
+#define APP_CONFIG_CHANNELS_PER_ADC   16U      /* AD7124-8 physical inputs per device */
+#define APP_CONFIG_ADC_COUNT          2U       /* ADC1 (hspi1) + ADC2 (hspi2) */
 #define APP_CONFIG_CONTROL_COUNT      4U
 #define APP_CONFIG_RESERVED_SIZE      64U
 #define APP_CONFIG_CHANNEL_NAME_LEN   12U
 #define APP_CONFIG_FILE_SPAN_MIN_DAYS 1U
 #define APP_CONFIG_FILE_SPAN_MAX_DAYS 365U
 
-#define APP_CONFIG_DEFAULT_DEVICE_ID          1UL
+#define APP_CONFIG_DEFAULT_DEVICE_ID          5UL
 #define APP_CONFIG_DEFAULT_MODBUS_ADDR        1U
 #define APP_CONFIG_DEFAULT_UART_BAUDRATE      115200UL
 #define APP_CONFIG_DEFAULT_SAMPLE_INTERVAL_S  60UL

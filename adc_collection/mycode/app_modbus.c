@@ -10,7 +10,7 @@
 static AppConfigImage *g_config = NULL;
 static AppConfigStore *g_config_store = NULL;
 static AppModbusChannelData g_channel_data[APP_CONFIG_CHANNEL_COUNT];
-static uint16_t g_ch_valid_mask = 0U;
+static uint32_t g_ch_valid_mask = 0U;
 static uint16_t g_sample_count = 0U;
 static AppRtcDateTime g_last_sample_time;
 static uint16_t g_system_status = 0U;
@@ -27,7 +27,7 @@ static uint16_t g_file_index = 0U;
 static uint16_t g_file_err = 0U;
 static uint8_t  g_file_xfer_pending = 0U;
 
-static uint16_t AppModbus_GetReadableChannelMask(void);
+static uint32_t AppModbus_GetReadableChannelMask(void);
 static uint8_t AppModbus_IsReadableChannel(uint8_t channel);
 
 /* Initialize */
@@ -58,14 +58,14 @@ void AppModbus_UpdateChannelData(uint8_t channel, uint32_t raw, int32_t uv)
   if (AppModbus_IsReadableChannel(channel) == 0U)
   {
     memset(&g_channel_data[channel], 0, sizeof(g_channel_data[channel]));
-    g_ch_valid_mask &= (uint16_t)(~(uint16_t)(1U << channel));
+    g_ch_valid_mask &= ~(1UL << channel);
     return;
   }
 
   g_channel_data[channel].raw_code = raw;
   g_channel_data[channel].voltage_uv = uv;
   g_channel_data[channel].valid = 1U;
-  g_ch_valid_mask |= (1U << channel);
+  g_ch_valid_mask |= (1UL << channel);
 }
 
 void AppModbus_ClearChannelData(void)
@@ -87,6 +87,11 @@ void AppModbus_UpdateSystemStatus(uint8_t ad7124_ready, uint8_t eeprom_ok,
 }
 
 /* Update sample timestamp */
+void AppModbus_SetErrorCode(uint16_t code)
+{
+  g_last_error_code = code;
+}
+
 void AppModbus_UpdateSampleTimestamp(void)
 {
   AppRtc_GetDateTime(&g_last_sample_time);
@@ -99,14 +104,14 @@ static uint32_t Unpack32(const uint16_t *regs)
   return ((uint32_t)regs[0] << 16) | regs[1];
 }
 
-static uint16_t AppModbus_GetReadableChannelMask(void)
+static uint32_t AppModbus_GetReadableChannelMask(void)
 {
-  uint16_t enabled_mask = 0U;
-  uint16_t occupied_mask = 0U;
+  uint32_t enabled_mask = 0UL;
+  uint32_t occupied_mask = 0UL;
 
   if (g_config == NULL)
   {
-    return 0U;
+    return 0UL;
   }
 
   for (uint8_t ch = 0U; ch < APP_CONFIG_CHANNEL_COUNT; ch++)
@@ -118,16 +123,19 @@ static uint16_t AppModbus_GetReadableChannelMask(void)
       continue;
     }
 
-    enabled_mask |= (uint16_t)(1U << ch);
+    enabled_mask |= (1UL << ch);
 
+    /* A differential channel's negative AIN is on the SAME ADC, so the
+       occupied logical channel is this ADC's base + negative_input. */
     if ((cfg->mode == APP_CHANNEL_MODE_DIFFERENTIAL) &&
         (cfg->negative_input <= APP_ADC_INPUT_AIN15))
     {
-      occupied_mask |= (uint16_t)(1U << cfg->negative_input);
+      uint8_t adc_base = (uint8_t)((ch / APP_CONFIG_CHANNELS_PER_ADC) * APP_CONFIG_CHANNELS_PER_ADC);
+      occupied_mask |= (1UL << (adc_base + cfg->negative_input));
     }
   }
 
-  return (uint16_t)(enabled_mask & (uint16_t)(~occupied_mask));
+  return enabled_mask & ~occupied_mask;
 }
 
 static uint8_t AppModbus_IsReadableChannel(uint8_t channel)
@@ -137,7 +145,7 @@ static uint8_t AppModbus_IsReadableChannel(uint8_t channel)
     return 0U;
   }
 
-  return ((AppModbus_GetReadableChannelMask() & (uint16_t)(1U << channel)) != 0U) ? 1U : 0U;
+  return ((AppModbus_GetReadableChannelMask() & (1UL << channel)) != 0UL) ? 1U : 0U;
 }
 
 static uint8_t AppModbus_IsValidControlConfig(const AppControlOutputConfig *ctrl)
@@ -289,6 +297,7 @@ uint8_t AppModbus_ReadHoldingRegisters(uint16_t start_addr, uint16_t count, uint
     else if (addr == 0x0001U) out_regs[i] = (uint16_t)(g_config->device_id & 0xFFFFU);
     else if (addr == 0x0002U) out_regs[i] = APP_FIRMWARE_VERSION;
     else if (addr == 0x0003U) out_regs[i] = g_config->version;
+    else if (addr == 0x0004U) out_regs[i] = (uint16_t)APP_CONFIG_CHANNEL_COUNT;  /* channel count (device capability) */
 
     /* 0x0010–0x001F: System Config */
     else if (addr == 0x0010U) out_regs[i] = g_config->modbus_addr;
@@ -336,11 +345,15 @@ uint8_t AppModbus_ReadHoldingRegisters(uint16_t start_addr, uint16_t count, uint
       out_regs[i] = ControlOutputs_GetForce(ctrl_idx);
     }
 
-    /* 0x0100–0x01FF: Channel Config (16 channels × 16 regs) */
-    else if (addr >= 0x0100U && addr <= 0x01FFU)
+    /* Channel Config: ch0-15 at 0x0100-0x01FF, ch16-31 appended at
+       0x0400-0x04FF (16 regs per channel). */
+    else if ((addr >= 0x0100U && addr <= 0x01FFU) ||
+             (addr >= 0x0400U && addr <= 0x04FFU))
     {
-      uint16_t ch_offset = addr - 0x0100U;
-      uint8_t ch_idx = (uint8_t)(ch_offset / 0x10U);
+      uint16_t ch_offset = (addr <= 0x01FFU) ? (uint16_t)(addr - 0x0100U)
+                                             : (uint16_t)(addr - 0x0400U);
+      uint8_t ch_base = (addr <= 0x01FFU) ? 0U : (uint8_t)APP_CONFIG_CHANNELS_PER_ADC;
+      uint8_t ch_idx = (uint8_t)(ch_base + (ch_offset / 0x10U));
       uint8_t reg_offset = (uint8_t)(ch_offset % 0x10U);
 
       if (ch_idx >= APP_CONFIG_CHANNEL_COUNT)
@@ -386,7 +399,7 @@ uint8_t AppModbus_ReadHoldingRegisters(uint16_t start_addr, uint16_t count, uint
       else out_regs[i] = 0U; /* Reserved */
     }
 
-    /* 0x0300–0x035F: Channel Names (16 channels × 6 regs × 2 ASCII chars) */
+    /* 0x0300–0x03BF: Channel Names (32 channels × 6 regs × 2 ASCII chars) */
     else if (AppModbus_IsChannelNameAddr(addr) != 0U)
     {
       if (AppModbus_ReadChannelNameReg(addr, &out_regs[i]) == 0U)
@@ -432,6 +445,27 @@ uint8_t AppModbus_ReadInputRegisters(uint16_t start_addr, uint16_t count, uint16
       else if (reg_offset == 3U) out_regs[i] = (uint16_t)(ch->raw_code & 0xFFFFU);
     }
 
+    /* 0x0080–0x00BF: Channel Measurement, channels 16..31 (append block) */
+    else if (addr >= 0x0080U && addr <= 0x00BFU)
+    {
+      uint8_t ch_idx = (uint8_t)(APP_CONFIG_CHANNELS_PER_ADC + ((addr - 0x0080U) / 4U));
+      uint8_t reg_offset = (uint8_t)((addr - 0x0080U) % 4U);
+
+      if (ch_idx >= APP_CONFIG_CHANNEL_COUNT)
+        return MODBUS_EX_ILLEGAL_DATA_ADDRESS;
+
+      const AppModbusChannelData *ch = &g_channel_data[ch_idx];
+
+      if (AppModbus_IsReadableChannel(ch_idx) == 0U)
+      {
+        out_regs[i] = 0U;
+      }
+      else if (reg_offset == 0U) out_regs[i] = (uint16_t)(ch->voltage_uv >> 16);
+      else if (reg_offset == 1U) out_regs[i] = (uint16_t)(ch->voltage_uv & 0xFFFFU);
+      else if (reg_offset == 2U) out_regs[i] = (uint16_t)(ch->raw_code >> 16);
+      else if (reg_offset == 3U) out_regs[i] = (uint16_t)(ch->raw_code & 0xFFFFU);
+    }
+
     /* 0x0040–0x0047: Control Output Status (4 controls × 2 regs) */
     else if (addr >= 0x0040U && addr <= 0x0047U)
     {
@@ -453,13 +487,14 @@ uint8_t AppModbus_ReadInputRegisters(uint16_t start_addr, uint16_t count, uint16
     }
 
     /* 0x0048–0x004F: Data Freshness */
-    else if (addr == 0x0048U) out_regs[i] = (uint16_t)(g_ch_valid_mask & AppModbus_GetReadableChannelMask());
+    else if (addr == 0x0048U) out_regs[i] = (uint16_t)((g_ch_valid_mask & AppModbus_GetReadableChannelMask()) & 0xFFFFU);
     else if (addr == 0x0049U) out_regs[i] = g_sample_count;
     else if (addr == 0x004AU) out_regs[i] = g_last_sample_time.year;
     else if (addr == 0x004BU) out_regs[i] = ((uint16_t)g_last_sample_time.month << 8) | g_last_sample_time.day;
     else if (addr == 0x004CU) out_regs[i] = ((uint16_t)g_last_sample_time.hour << 8) | g_last_sample_time.minute;
     else if (addr == 0x004DU) out_regs[i] = g_last_sample_time.second;
-    else if (addr >= 0x004EU && addr <= 0x004FU) out_regs[i] = 0U; /* Reserved */
+    else if (addr == 0x004EU) out_regs[i] = (uint16_t)(((g_ch_valid_mask & AppModbus_GetReadableChannelMask()) >> 16) & 0xFFFFU); /* valid mask ch16-31 */
+    else if (addr == 0x004FU) out_regs[i] = 0U; /* Reserved */
 
     /* 0x0050–0x0053: System Status. RUNNING bit reflects the live config so
        the host sees state changes immediately after writing HR_RUN_ENABLE,
@@ -777,7 +812,8 @@ uint8_t AppModbus_WriteMultipleRegisters(uint16_t start_addr, uint16_t count, co
     /* Channel config (0x0100-0x01FF) is handled inline below and needs a
        hardware reconfigure afterwards. ADC config (0x0020-0x0022) is
        delegated to FC06, which fires its own reconfigure. */
-    if (addr >= 0x0100U && addr <= 0x01FFU)
+    if ((addr >= 0x0100U && addr <= 0x01FFU) ||
+        (addr >= 0x0400U && addr <= 0x04FFU))
       adc_config_dirty = 1U;
     if (addr >= 0x0200U && addr <= 0x022FU)
       control_config_dirty = 1U;
@@ -829,11 +865,14 @@ uint8_t AppModbus_WriteMultipleRegisters(uint16_t start_addr, uint16_t count, co
       i += 3U;
     }
 
-    /* Channel Config */
-    else if (addr >= 0x0100U && addr <= 0x01FFU)
+    /* Channel Config: ch0-15 at 0x0100-0x01FF, ch16-31 at 0x0400-0x04FF */
+    else if ((addr >= 0x0100U && addr <= 0x01FFU) ||
+             (addr >= 0x0400U && addr <= 0x04FFU))
     {
-      uint16_t ch_offset = addr - 0x0100U;
-      uint8_t ch_idx = (uint8_t)(ch_offset / 0x10U);
+      uint16_t ch_offset = (addr <= 0x01FFU) ? (uint16_t)(addr - 0x0100U)
+                                             : (uint16_t)(addr - 0x0400U);
+      uint8_t ch_base = (addr <= 0x01FFU) ? 0U : (uint8_t)APP_CONFIG_CHANNELS_PER_ADC;
+      uint8_t ch_idx = (uint8_t)(ch_base + (ch_offset / 0x10U));
       uint8_t reg_offset = (uint8_t)(ch_offset % 0x10U);
 
       if (ch_idx >= APP_CONFIG_CHANNEL_COUNT)

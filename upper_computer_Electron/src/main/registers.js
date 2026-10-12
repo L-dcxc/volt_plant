@@ -23,6 +23,8 @@ const HR = {
   FILE_INDEX: 0x0061,
   CHANNEL_BASE: 0x0100,
   CHANNEL_STRIDE: 0x10,
+  CHANNEL_BASE_HI: 0x0400,   // ch16-31 config (append block)
+  CHANNEL_COUNT_REG: 0x0004, // device channel-count capability
   CONTROL_BASE: 0x0200,
   CONTROL_STRIDE: 0x0c,
   CHANNEL_NAME_BASE: 0x0300,
@@ -32,9 +34,11 @@ const HR = {
 const IR = {
   CHANNEL_BASE: 0x0000,
   CHANNEL_STRIDE: 4,
+  CHANNEL_BASE_HI: 0x0080,   // ch16-31 realtime (append block)
   CONTROL_STATUS_BASE: 0x0040,
   CONTROL_STATUS_STRIDE: 2,
   CH_VALID_MASK: 0x0048,
+  CH_VALID_MASK_HI: 0x004e,  // valid mask ch16-31
   SYS_STATUS: 0x0050,
   SD_TOTAL_MB_H: 0x0054,
   BATTERY_MV: 0x0058,
@@ -59,7 +63,8 @@ const FILE_CMD = {
 };
 
 const CHANNEL = {
-  COUNT: 16,
+  COUNT: 32,
+  CHANNELS_PER_ADC: 16,
   NAME_LEN: 12,
   NAME_REG_COUNT: 6,
   REG_COUNT: 0x0c,
@@ -137,11 +142,15 @@ function unpackBytes(reg) {
 }
 
 function channelBase(ch) {
-  return HR.CHANNEL_BASE + ch * HR.CHANNEL_STRIDE;
+  return ch < CHANNEL.CHANNELS_PER_ADC
+    ? HR.CHANNEL_BASE + ch * HR.CHANNEL_STRIDE
+    : HR.CHANNEL_BASE_HI + (ch - CHANNEL.CHANNELS_PER_ADC) * HR.CHANNEL_STRIDE;
 }
 
 function channelDataBase(ch) {
-  return IR.CHANNEL_BASE + ch * IR.CHANNEL_STRIDE;
+  return ch < CHANNEL.CHANNELS_PER_ADC
+    ? IR.CHANNEL_BASE + ch * IR.CHANNEL_STRIDE
+    : IR.CHANNEL_BASE_HI + (ch - CHANNEL.CHANNELS_PER_ADC) * IR.CHANNEL_STRIDE;
 }
 
 function controlBase(index) {

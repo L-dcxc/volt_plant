@@ -140,6 +140,19 @@ input:focus, select:focus { border-color: var(--accent); }
 .rail-status { font-weight: 600; font-size: 13px; }
 .rail-status.online { color: var(--ok); }
 .rail-status.offline { color: var(--warn); }
+.rail-mode {
+  width: 100%;
+  margin: 0 0 10px;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ok);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.rail-mode:hover { background: var(--panel-2); }
 
 .main {
   padding: 14px 16px;
